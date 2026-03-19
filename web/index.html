@@ -24,60 +24,6 @@
 </head>
 <body>
 
-<!-- ══════════════════════ TOP NAV BAR ══════════════════════════════ -->
-<nav id="top-nav" role="navigation" aria-label="Main navigation">
-  <div style="display:flex;align-items:center;gap:2rem;">
-    <div class="nav-brand">VOX<em>Y</em></div>
-    <ul class="nav-links">
-      <li><a href="#">Gallery</a></li>
-      <li><a href="#">Community</a></li>
-    </ul>
-  </div>
-  <div class="nav-right">
-    <div class="nav-search">
-      <span class="material-symbols-outlined">search</span>
-      <input type="text" placeholder="Search assets…" aria-label="Search" />
-    </div>
-    <button class="nav-avatar" aria-label="Account">
-      <span class="material-symbols-outlined">account_circle</span>
-    </button>
-  </div>
-</nav>
-
-<!-- ══════════════════════ LEFT SIDEBAR ═════════════════════════════ -->
-<aside id="sidebar" role="complementary" aria-label="Navigation">
-  <div class="sidebar-header">
-    <div class="sidebar-project">VOXY Studio</div>
-    <div class="sidebar-sub">GLB → MagicaVoxel</div>
-  </div>
-
-  <nav class="sidebar-nav">
-    <button class="sidebar-item active">
-      <span class="material-symbols-outlined">refresh</span>
-      Convert
-    </button>
-    <button class="sidebar-item">
-      <span class="material-symbols-outlined">inventory_2</span>
-      Library
-    </button>
-    <button class="sidebar-item">
-      <span class="material-symbols-outlined">category</span>
-      Materials
-    </button>
-    <button class="sidebar-item">
-      <span class="material-symbols-outlined">ios_share</span>
-      Export
-    </button>
-  </nav>
-
-  <div class="sidebar-footer">
-    <button class="btn-new-conversion">
-      <span class="material-symbols-outlined">add</span>
-      New Conversion
-    </button>
-  </div>
-</aside>
-
 <!-- ══════════════════════ THREE.JS CANVAS ══════════════════════════ -->
 <div id="canvas-container">
   <!-- Viewport header badges -->
@@ -106,147 +52,150 @@
   </div>
 </div>
 
-<!-- ══════════════════════ RIGHT PROPERTIES PANEL ═══════════════════ -->
-<aside id="panel" role="complementary" aria-label="Voxelizer controls">
+<!-- ══════════════════════ EDITOR UI OVERLAYS ═══════════════════ -->
+<div id="editor-ui">
 
-  <!-- Header -->
-  <header class="panel-header">
-    <div class="panel-eyebrow">Conversion Settings</div>
-    <div class="panel-title">VOXY<span>.</span></div>
-    <div class="panel-subtitle">GLB → MagicaVoxel .vox</div>
-  </header>
+  <!-- Left Sidebar: Inputs & Tools -->
+  <aside class="editor-panel" id="panel-left">
+    <!-- Top Log / Header -->
+    <header class="panel-header">
+      <div class="panel-eyebrow">Conversion Settings</div>
+      <div class="panel-title">VOXY<span>.</span></div>
+      <div class="panel-subtitle">GLB → MagicaVoxel .vox</div>
+    </header>
 
-  <!-- Model input -->
-  <div class="card">
-    <div class="card-label">3D Model</div>
-    <div class="drop-zone" id="drop-zone" title="Click or drag a .glb file">
-      <input type="file" id="input-glb" accept=".glb" aria-label="Choose GLB file" />
-      <div class="drop-icon-wrap">
-        <span class="material-symbols-outlined">upload_file</span>
+    <!-- Model input -->
+    <div class="card">
+      <div class="card-label">3D Model</div>
+      <div class="drop-zone" id="drop-zone" title="Click or drag a .glb file">
+        <input type="file" id="input-glb" accept=".glb" aria-label="Choose GLB file" />
+        <div class="drop-icon-wrap">
+          <span class="material-symbols-outlined">upload_file</span>
+        </div>
+        <div class="drop-info">
+          <div class="drop-name" id="drop-name">Choose .glb file</div>
+          <div class="drop-hint">GLB only · drag &amp; drop supported</div>
+        </div>
       </div>
-      <div class="drop-info">
-        <div class="drop-name" id="drop-name">Choose .glb file</div>
-        <div class="drop-hint">GLB only · drag &amp; drop supported</div>
+    </div>
+
+    <!-- Palette input & Paint tool -->
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div class="card-label">Colour Palette</div>
+        <label class="toggle-paint">
+          <input type="checkbox" id="toggle-paint" aria-label="Toggle paint tool">
+          <span class="material-symbols-outlined" style="font-size: 16px;">format_paint</span>
+          Paint
+        </label>
+      </div>
+      
+      <div class="drop-zone" id="drop-zone-pal" title="Click or drag a .hex file">
+        <input type="file" id="input-pal" accept=".hex" aria-label="Choose HEX palette file" />
+        <div class="drop-icon-wrap">
+          <span class="material-symbols-outlined">palette</span>
+        </div>
+        <div class="drop-info">
+          <div class="drop-name" id="drop-name-pal">Choose .hex file</div>
+          <div class="drop-hint">Local palette file</div>
+        </div>
+      </div>
+      
+      <div id="palette-swatches" aria-label="Palette preview"></div>
+      <div id="palette-name"></div>
+    </div>
+  </aside>
+
+  <!-- Right Sidebar: Settings & Actions -->
+  <aside class="editor-panel" id="panel-right">
+    <!-- Resolution slider -->
+    <div class="card">
+      <div class="card-label">Voxel Resolution</div>
+      <div class="slider-header">
+        <span class="slider-desc">Grid size — longest axis</span>
+        <span class="slider-badge" id="slider-value">32</span>
+      </div>
+      <div class="slider-wrap">
+        <input
+          type="range"
+          id="slider-grid"
+          min="8" max="256" step="1" value="32"
+          aria-label="Voxel grid resolution"
+          style="--pct: 11%"
+        />
+      </div>
+      <div class="slider-ticks">
+        <span>8</span>
+        <span>64</span>
+        <span>128</span>
+        <span>192</span>
+        <span>256</span>
+      </div>
+      <div style="margin-top: 1rem; display: flex; justify-content: flex-end;">
+        <label class="toggle-paint">
+          <input type="checkbox" id="toggle-lines" aria-label="Toggle block lines">
+          <span class="material-symbols-outlined" style="font-size: 16px;">grid_4x4</span>
+          Show Lines
+        </label>
+      </div>
+    </div>
+
+    <!-- Progress, status & Actions -->
+    <div class="card">
+      <div class="progress-track"><div id="progress-fill"></div></div>
+      <div class="status-row">
+        <div class="status-dot" id="status-dot"></div>
+        <span id="status-text">Initialising Wasm module…</span>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary" id="btn-convert" disabled>
+          <span class="material-symbols-outlined" style="font-size:18px;">auto_awesome</span>
+          Voxelise
+        </button>
+        <button class="btn btn-secondary" id="btn-download" disabled>
+          <span class="material-symbols-outlined" style="font-size:18px;">download</span>
+          Download .vox
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Bottom Center: Horizontal Quick Stats -->
+  <div class="editor-panel" id="panel-bottom-center">
+    <div class="quick-stats-bar">
+      <div class="qs-item qs-highlight" id="export-highlight">
+        <span class="material-symbols-outlined qs-icon">inventory</span>
+        <div class="qs-text">
+          <div class="qs-label">File Size</div>
+          <div class="qs-val" id="stat-bytes">—</div>
+        </div>
+      </div>
+      <div class="qs-item">
+        <div class="qs-text">
+          <div class="qs-label">Voxels</div>
+          <div class="qs-val" id="stat-count">—</div>
+        </div>
+      </div>
+      <div class="qs-divider"></div>
+      <div class="qs-item">
+        <div class="qs-text">
+          <div class="qs-label">Dimensions</div>
+          <div class="qs-val" id="stat-size">—</div>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- Palette input & Paint tool -->
-  <div class="card">
-    <div style="display: flex; justify-content: space-between; align-items: center;">
-      <div class="card-label">Colour Palette</div>
-      <label class="toggle-paint">
-        <input type="checkbox" id="toggle-paint" aria-label="Toggle paint tool">
-        <span class="material-symbols-outlined" style="font-size: 16px;">format_paint</span>
-        Paint
-      </label>
-    </div>
-    
-    <div class="drop-zone" id="drop-zone-pal" title="Click or drag a .hex file">
-      <input type="file" id="input-pal" accept=".hex" aria-label="Choose HEX palette file" />
-      <div class="drop-icon-wrap">
-        <span class="material-symbols-outlined">palette</span>
-      </div>
-      <div class="drop-info">
-        <div class="drop-name" id="drop-name-pal">Choose .hex file</div>
-        <div class="drop-hint">Local palette file</div>
-      </div>
-    </div>
-    
-    <div id="palette-swatches" aria-label="Palette preview"></div>
-    <div id="palette-name"></div>
+  <!-- Bottom Left: Footer -->
+  <div class="editor-panel" id="panel-bottom-fixed">
+    <footer class="panel-footer">
+      <span class="footer-text">Emscripten · Three.js · tinygltf</span>
+      <span class="footer-badge">WASM</span>
+    </footer>
   </div>
 
-  <!-- Resolution slider -->
-  <div class="card">
-    <div class="card-label">Voxel Resolution</div>
-    <div class="slider-header">
-      <span class="slider-desc">Grid size — longest axis</span>
-      <span class="slider-badge" id="slider-value">32</span>
-    </div>
-    <div class="slider-wrap">
-      <input
-        type="range"
-        id="slider-grid"
-        min="8" max="256" step="1" value="32"
-        aria-label="Voxel grid resolution"
-        style="--pct: 11%"
-      />
-    </div>
-    <div class="slider-ticks">
-      <span>8</span>
-      <span>64</span>
-      <span>128</span>
-      <span>192</span>
-      <span>256</span>
-    </div>
-    <div style="margin-top: 1rem; display: flex; justify-content: flex-end;">
-      <label class="toggle-paint">
-        <input type="checkbox" id="toggle-lines" aria-label="Toggle block lines">
-        <span class="material-symbols-outlined" style="font-size: 16px;">grid_4x4</span>
-        Show Lines
-      </label>
-    </div>
-  </div>
-
-  <!-- Progress & status -->
-  <div class="progress-track"><div id="progress-fill"></div></div>
-  <div class="status-row">
-    <div class="status-dot" id="status-dot"></div>
-    <span id="status-text">Initialising Wasm module…</span>
-  </div>
-
-  <!-- Action buttons -->
-  <div class="actions">
-    <button class="btn btn-primary" id="btn-convert" disabled>
-      <span class="material-symbols-outlined" style="font-size:18px;">auto_awesome</span>
-      Voxelise
-    </button>
-    <button class="btn btn-secondary" id="btn-download" disabled>
-      <span class="material-symbols-outlined" style="font-size:18px;">download</span>
-      Download .vox
-    </button>
-  </div>
-
-  <!-- Export summary highlight -->
-  <div class="export-highlight" id="export-highlight">
-    <div class="export-highlight-header">
-      <div class="export-icon-wrap">
-        <span class="material-symbols-outlined">inventory</span>
-      </div>
-      <div>
-        <div class="export-label-sm">Estimated Size</div>
-        <div class="export-value" id="export-size-display">—</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Statistics -->
-  <div class="card">
-    <div class="card-label">Statistics</div>
-    <div class="stats-grid">
-      <div class="stat-cell">
-        <div class="stat-cell-label">Voxels</div>
-        <div class="stat-cell-value" id="stat-count">—</div>
-      </div>
-      <div class="stat-cell">
-        <div class="stat-cell-label">File size</div>
-        <div class="stat-cell-value" id="stat-bytes">—</div>
-      </div>
-      <div class="stat-cell" style="grid-column: span 2;">
-        <div class="stat-cell-label">Dimensions</div>
-        <div class="stat-cell-value" id="stat-size">—</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Footer -->
-  <footer class="panel-footer">
-    <span class="footer-text">Emscripten · Three.js · tinygltf</span>
-    <span class="footer-badge">WASM</span>
-  </footer>
-
-</aside>
+</div>
 
 <script type="module" src="./main.js"></script>
 
@@ -256,7 +205,6 @@
   const statCount       = document.getElementById('stat-count');
   const statSize        = document.getElementById('stat-size');
   const statBytes       = document.getElementById('stat-bytes');
-  const exportSizeDisp  = document.getElementById('export-size-display');
 
   document.addEventListener('vox-updated', (e) => {
     const { voxCount, sizeX, sizeY, sizeZ, byteLen } = e.detail;
@@ -265,7 +213,6 @@
     statSize.textContent  = `${sizeX} × ${sizeY} × ${sizeZ}`;
     const kb = byteLen >= 1024 ? `${(byteLen / 1024).toFixed(1)} KB` : `${byteLen} B`;
     statBytes.textContent = kb;
-    exportSizeDisp.textContent = kb;
   });
 </script>
 

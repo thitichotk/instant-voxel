@@ -1,0 +1,10 @@
+# Core voxelize source code logic
+src/
+
+# Build artifacts
+build/
+
+# Node dependencies
+server/node_modules/
+node_modules/
+.DS_Store
