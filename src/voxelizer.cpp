@@ -1,9 +1,7 @@
 /**
  * voxelizer.cpp
  *
- * CPU-side GLB/GLTF → VOX converter exposed via Emscripten Embind.
- * Parallelised with OpenMP; the Emscripten toolchain maps each OpenMP
- * thread to a POSIX-pthread on background Web Workers.
+ * CPU-side GLB → VOX converter exposed via Emscripten Embind.
  *
  * Dependencies:
  *   tiny_gltf.h  (header-only, place at src/tiny_gltf.h)
@@ -11,33 +9,29 @@
  *
  * Public API (one JS-visible function):
  *
- *   convertGLBToVox(glbData    : Uint8Array,   // .glb or .gltf binary
- *                   paletteData: Uint8Array,    // 256×4 RGBA bytes (or
- * 0-length) gridSize   : number)        // longest axis voxel count →
- * Uint8Array   (MagicaVoxel .vox binary)
+ *   convertGLBToVox(glbData    : ArrayBuffer | Uint8Array,  // .glb binary
+ *                   paletteData: ArrayBuffer | Uint8Array,  // 256×4 RGBA or empty
+ *                   gridSize   : number,                    // longest axis voxels
+ *                   rotX, rotY : number)                    // degrees
+ *     → Uint8Array   (MagicaVoxel .vox binary)
  *
- * Voxel colour assignment:
- *   • No palette supplied: each glTF primitive's material colour is extracted —
- *     UV-sampled texture pixel modulated by baseColorFactor (per-vertex,
- * averaged across the triangle), or plain baseColorFactor when no texture is
- * present. The resulting sRGB triple is mapped to the nearest entry in the
- * built-in 6×6×6 RGB colour cube. • Lospec palette supplied: Y-axis height is
- * linearly mapped to indices 1–255, so any Lospec palette creates a
- * height-gradient colour scheme.
+ * Voxel colour assignment: each glTF primitive's material colour is extracted —
+ * UV-sampled texture pixel modulated by baseColorFactor (per-vertex, averaged
+ * across the triangle), or plain baseColorFactor when no texture is present —
+ * and mapped to the nearest palette entry. The palette is the uploaded one, or
+ * the built-in 6×6×6 RGB cube + grey ramp.
  */
 
 // ── tinygltf (header-only, implementation guard)
 // ──────────────────────────────
 #define TINYGLTF_IMPLEMENTATION
+#define TINYGLTF_NO_STB_IMAGE_WRITE // load-only: nothing here writes images
 #define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "tiny_gltf.h"
 
 // ── Emscripten
 // ────────────────────────────────────────────────────────────────
-#include <emscripten/bind.h>
-#include <emscripten/emscripten.h>
-#include <emscripten/val.h>
+#include <emscripten/bind.h> // also brings in val.h
 
 // ── STL
 // ───────────────────────────────────────────────────────────────────────
@@ -47,7 +41,6 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 using namespace emscripten;
@@ -89,13 +82,12 @@ static Mat4 mul4(const Mat4 &a, const Mat4 &b) {
   return r;
 }
 
+// glTF node transforms are affine (the spec requires TRS-decomposable
+// matrices), so w is always 1 and there is no perspective divide.
 static Vec3f transformPoint(const Mat4 &m, Vec3f p) {
-  float w = m[3] * p.x + m[7] * p.y + m[11] * p.z + m[15];
-  if (std::fabs(w) < 1e-10f)
-    w = 1.0f;
-  return {(m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12]) / w,
-          (m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13]) / w,
-          (m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14]) / w};
+  return {m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12],
+          m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13],
+          m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14]};
 }
 
 // Build a 4×4 matrix from a tinygltf node (matrix OR TRS).
@@ -166,11 +158,9 @@ static void extractMeshPrims(const tinygltf::Model &model, int meshIdx,
   const tinygltf::Mesh &mesh = model.meshes[meshIdx];
 
   for (const tinygltf::Primitive &prim : mesh.primitives) {
-    // Only TRIANGLES mode (4 = TRIANGLE_STRIP etc. are ignored).
-    int mode = prim.mode;
-    if (mode == -1)
-      mode = TINYGLTF_MODE_TRIANGLES; // default
-    if (mode != TINYGLTF_MODE_TRIANGLES)
+    // Only TRIANGLES mode (strips, fans, lines and points are ignored).
+    // tinygltf already defaults a missing "mode" to TRIANGLES.
+    if (prim.mode != TINYGLTF_MODE_TRIANGLES)
       continue;
 
     // ── POSITION accessor ──────────────────────────────────────────────
@@ -330,67 +320,56 @@ static void walkNode(const tinygltf::Model &model, int nodeIdx,
     walkNode(model, child, worldTx, tris);
 }
 
-static std::vector<Triangle> parseGLTF(const std::vector<uint8_t> &data, float rotX = 0.0f, float rotY = 0.0f) {
-  if (data.empty())
-    return {};
-
+static std::vector<Triangle> parseGLTF(const std::string &data, float rotX,
+                                       float rotY) {
   tinygltf::TinyGLTF loader;
   tinygltf::Model model;
   std::string err, warn;
 
-  bool ok = false;
   // GLB magic: bytes 0..3 == 'g','l','T','F'
-  bool isGLB = data.size() >= 4 && data[0] == 'g' && data[1] == 'l' &&
-               data[2] == 'T' && data[3] == 'F';
-
-  if (!isGLB) {
+  if (data.compare(0, 4, "glTF") != 0) {
     printf("[C++] GLB load failed: Input is not a valid binary GLB format.\n");
     return {};
   }
 
-  if (isGLB) {
-    ok = loader.LoadBinaryFromMemory(&model, &err, &warn, data.data(),
-                                     (unsigned)data.size());
-  }
-
-  if (!ok) {
+  if (!loader.LoadBinaryFromMemory(
+          &model, &err, &warn,
+          reinterpret_cast<const unsigned char *>(data.data()),
+          (unsigned)data.size())) {
     printf("[C++] GLTF load failed. err=%s warn=%s\n", err.c_str(),
            warn.c_str());
     return {};
   }
 
   std::vector<Triangle> tris;
-  Mat4 I = identity4();
 
-  // Apply root rotations if provided (rotX and rotY are in degrees)
-  if (rotX != 0.0f || rotY != 0.0f) {
-    float rx = rotX * M_PI / 180.0f;
-    float ry = rotY * M_PI / 180.0f;
+  // Root rotation from the UI gizmos (degrees; 0,0 gives the identity)
+  float rx = rotX * M_PI / 180.0f;
+  float ry = rotY * M_PI / 180.0f;
 
-    Mat4 matX = identity4();
-    matX[5]  = cos(rx);
-    matX[6]  = sin(rx);
-    matX[9]  = -sin(rx);
-    matX[10] = cos(rx);
+  Mat4 matX = identity4();
+  matX[5]  = cos(rx);
+  matX[6]  = sin(rx);
+  matX[9]  = -sin(rx);
+  matX[10] = cos(rx);
 
-    Mat4 matY = identity4();
-    matY[0]  = cos(ry);
-    matY[2]  = -sin(ry);
-    matY[8]  = sin(ry);
-    matY[10] = cos(ry);
+  Mat4 matY = identity4();
+  matY[0]  = cos(ry);
+  matY[2]  = -sin(ry);
+  matY[8]  = sin(ry);
+  matY[10] = cos(ry);
 
-    I = mul4(matX, matY);
-  }
+  Mat4 root = mul4(matX, matY);
 
   // Walk every scene (typically just one)
   for (const tinygltf::Scene &scene : model.scenes)
     for (int ni : scene.nodes)
-      walkNode(model, ni, I, tris);
+      walkNode(model, ni, root, tris);
 
   // Fallback: if no scenes defined, walk all nodes
   if (tris.empty() && !model.nodes.empty())
     for (int ni = 0; ni < (int)model.nodes.size(); ++ni)
-      walkNode(model, ni, I, tris);
+      walkNode(model, ni, root, tris);
 
   return tris;
 }
@@ -414,39 +393,21 @@ static bool triBoxOverlap(Vec3f boxCenter, float halfSize, Vec3f v0, Vec3f v1,
     return (mn > r || mx < -r);
   };
 
-  auto axX = [](Vec3f e) -> Vec3f { return {0, -e.z, e.y}; };
-  auto axY = [](Vec3f e) -> Vec3f { return {e.z, 0, -e.x}; };
-  auto axZ = [](Vec3f e) -> Vec3f { return {-e.y, e.x, 0}; };
+  // 9 axes: each triangle edge × each box axis.
+  for (Vec3f e : {e0, e1, e2})
+    for (Vec3f u : {Vec3f{1, 0, 0}, Vec3f{0, 1, 0}, Vec3f{0, 0, 1}})
+      if (axisTest(cross(u, e)))
+        return false;
 
-  if (axisTest(axX(e0)))
-    return false;
-  if (axisTest(axY(e0)))
-    return false;
-  if (axisTest(axZ(e0)))
-    return false;
-  if (axisTest(axX(e1)))
-    return false;
-  if (axisTest(axY(e1)))
-    return false;
-  if (axisTest(axZ(e1)))
-    return false;
-  if (axisTest(axX(e2)))
-    return false;
-  if (axisTest(axY(e2)))
-    return false;
-  if (axisTest(axZ(e2)))
-    return false;
-
+  // 3 axes: the box face normals.
   auto inRange = [&](float a, float b, float c) {
     return !(std::min({a, b, c}) > halfSize || std::max({a, b, c}) < -halfSize);
   };
-  if (!inRange(ta.x, tb.x, tc.x))
-    return false;
-  if (!inRange(ta.y, tb.y, tc.y))
-    return false;
-  if (!inRange(ta.z, tb.z, tc.z))
+  if (!inRange(ta.x, tb.x, tc.x) || !inRange(ta.y, tb.y, tc.y) ||
+      !inRange(ta.z, tb.z, tc.z))
     return false;
 
+  // 1 axis: the triangle normal.
   Vec3f n = cross(e0, e1);
   float d = dot(n, ta);
   float r2 = halfSize * (std::fabs(n.x) + std::fabs(n.y) + std::fabs(n.z));
@@ -483,22 +444,14 @@ static Palette defaultPalette() {
   return p;
 }
 
-// Accept raw 256×4 RGBA bytes (produced by the Lospec fetch in JS).
-// If the buffer is short (fewer than 256 colours), it is tiled to fill all
-// slots.
-static Palette parsePaletteRGBA(const std::vector<uint8_t> &raw) {
-  if (raw.empty() || raw.size() % 4 != 0)
+// Accept the raw 256×4 RGBA bytes main.js builds from the uploaded .hex
+// palette; anything else (i.e. empty) selects the default palette.
+static Palette parsePaletteRGBA(const std::string &raw) {
+  static_assert(sizeof(Palette) == 256 * 4, "Palette must be tightly packed");
+  if (raw.size() != sizeof(Palette))
     return defaultPalette();
-
-  const int nColors = (int)(raw.size() / 4);
-  Palette p{};
-  for (int i = 0; i < 256; ++i) {
-    const int src = (i % nColors) * 4;
-    p[i][0] = raw[src + 0];
-    p[i][1] = raw[src + 1];
-    p[i][2] = raw[src + 2];
-    p[i][3] = raw[src + 3];
-  }
+  Palette p;
+  std::memcpy(p.data(), raw.data(), sizeof(Palette));
   return p;
 }
 
@@ -549,12 +502,11 @@ struct VoxGrid {
 
 // ────────────────────────────────────────────────────────────────────────────
 //  Voxelisation
-//  Height-gradient colour: maps voxel Y position → palette indices 1–255
-//  so any Lospec palette produces a natural gradient across the model.
+//  Each voxel takes the nearest palette index to its triangle's colour.
 // ────────────────────────────────────────────────────────────────────────────
 
 static VoxGrid voxelise(const std::vector<Triangle> &tris, int gridSize,
-                        const Palette &pal, bool useMatColor) {
+                        const Palette &pal) {
   if (tris.empty())
     return VoxGrid(1, 1, 1);
 
@@ -587,13 +539,10 @@ static VoxGrid voxelise(const std::vector<Triangle> &tris, int gridSize,
   int nTris = (int)tris.size();
 
   // Pre-compute nearest-palette index for every triangle so findNearestColor
-  // is called O(N_tris) times, not O(N_voxels) times.  When using the
-  // height-gradient path the array is left at index 1 (unused).
-  std::vector<uint8_t> triColor(nTris, 1);
-  if (useMatColor) {
-    for (int ti = 0; ti < nTris; ++ti)
-      triColor[ti] = findNearestColor(pal, tris[ti].r, tris[ti].g, tris[ti].b);
-  }
+  // is called O(N_tris) times, not O(N_voxels) times.
+  std::vector<uint8_t> triColor(nTris);
+  for (int ti = 0; ti < nTris; ++ti)
+    triColor[ti] = findNearestColor(pal, tris[ti].r, tris[ti].g, tris[ti].b);
 
   for (int ti = 0; ti < nTris; ++ti) {
     const Triangle &tri = tris[ti];
@@ -624,16 +573,8 @@ static VoxGrid voxelise(const std::vector<Triangle> &tris, int gridSize,
           Vec3f centre{mn.x + (xi + 0.5f) * cellSize,
                        mn.y + (yi + 0.5f) * cellSize,
                        mn.z + (zi + 0.5f) * cellSize};
-          if (triBoxOverlap(centre, half, tri.v[0], tri.v[1], tri.v[2])) {
-            // useMatColor: use pre-computed nearest-palette index for the
-            // triangle's extracted material colour.
-            // height-gradient: map voxel Y (0..gy-1) to indices 1..255 so
-            // any Lospec palette creates a natural top-to-bottom gradient.
-            uint8_t cIdx =
-                useMatColor ? triColor[ti]
-                            : (uint8_t)(1 + (yi * 254 / std::max(1, gy - 1)));
-            grid.set(xi, yi, zi, cIdx);
-          }
+          if (triBoxOverlap(centre, half, tri.v[0], tri.v[1], tri.v[2]))
+            grid.set(xi, yi, zi, triColor[ti]);
         }
   }
   return grid;
@@ -651,45 +592,28 @@ static void pushU32(std::vector<uint8_t> &buf, uint32_t v) {
 }
 
 static std::vector<uint8_t> encodeVox(const VoxGrid &grid, const Palette &pal) {
-  struct VE {
-    uint8_t x, y, z, c;
-  };
-  std::vector<VE> voxels;
-  voxels.reserve(grid.sx * grid.sy * grid.sz / 8);
-
-  for (int z = 0; z < grid.sz; ++z)
-    for (int y = 0; y < grid.sy; ++y)
-      for (int x = 0; x < grid.sx; ++x) {
-        uint8_t c = grid.get(x, y, z);
-        if (c > 0)
-          voxels.push_back({(uint8_t)x, (uint8_t)y, (uint8_t)z, c});
-      }
-
   std::vector<uint8_t> sizeChunk;
   pushU32(sizeChunk, (uint32_t)grid.sx);
   pushU32(sizeChunk, (uint32_t)grid.sy);
   pushU32(sizeChunk, (uint32_t)grid.sz);
 
-  std::vector<uint8_t> xyziChunk;
-  pushU32(xyziChunk, (uint32_t)voxels.size());
-  for (const auto &v : voxels) {
-    xyziChunk.push_back(v.x);
-    xyziChunk.push_back(v.y);
-    xyziChunk.push_back(v.z);
-    xyziChunk.push_back(v.c);
-  }
+  // XYZI: voxel count (patched in after the scan), then x,y,z,colour each.
+  std::vector<uint8_t> xyziChunk(4);
+  for (int z = 0; z < grid.sz; ++z)
+    for (int y = 0; y < grid.sy; ++y)
+      for (int x = 0; x < grid.sx; ++x)
+        if (uint8_t c = grid.get(x, y, z))
+          xyziChunk.insert(xyziChunk.end(),
+                           {(uint8_t)x, (uint8_t)y, (uint8_t)z, c});
+  uint32_t nVoxels = (uint32_t)(xyziChunk.size() / 4 - 1);
+  for (int i = 0; i < 4; ++i)
+    xyziChunk[i] = (uint8_t)(nVoxels >> (8 * i)); // little-endian, as pushU32
 
-  std::vector<uint8_t> rgbaChunk(1024, 0);
-  for (int i = 0; i < 255; ++i) {
-    rgbaChunk[i * 4 + 0] = pal[i + 1][0];
-    rgbaChunk[i * 4 + 1] = pal[i + 1][1];
-    rgbaChunk[i * 4 + 2] = pal[i + 1][2];
-    rgbaChunk[i * 4 + 3] = pal[i + 1][3];
-  }
-  rgbaChunk[255 * 4 + 0] = pal[0][0];
-  rgbaChunk[255 * 4 + 1] = pal[0][1];
-  rgbaChunk[255 * 4 + 2] = pal[0][2];
-  rgbaChunk[255 * 4 + 3] = pal[0][3];
+  // RGBA: entry i holds colour index i+1 (index 0 is the empty voxel), so the
+  // palette is stored rotated left by one.
+  std::vector<uint8_t> rgbaChunk(1024);
+  for (int i = 0; i < 256; ++i)
+    std::memcpy(&rgbaChunk[i * 4], pal[(i + 1) & 255].data(), 4);
 
   auto writeChunk = [](std::vector<uint8_t> &dst, const char id[4],
                        const std::vector<uint8_t> &content,
@@ -726,64 +650,20 @@ static std::vector<uint8_t> g_result;
 /**
  * convertGLBToVox
  *
- * @param glbPtr      Pointer into Wasm heap holding raw .glb/.gltf bytes
- * @param glbLen      Byte length of glbPtr region
- * @param palPtr      Pointer into Wasm heap holding flat RGBA bytes (n×4)
- * @param palLen      Byte length of palPtr region (0 = use default palette)
+ * @param glb         Raw .glb bytes (embind copies an ArrayBuffer/Uint8Array
+ *                    into the std::string)
+ * @param palRGBA     Flat 256×4 RGBA bytes (empty = use default palette)
  * @param gridSize    Voxel resolution along the longest axis (1–256)
+ * @param rotX, rotY  Root rotation in degrees
  * @return            MagicaVoxel .vox binary as a typed_memory_view
  * (Uint8Array)
- *
- * Callers (worker.js) must:
- *   const ptr = Module._malloc(bytes.length);
- *   Module.HEAPU8.set(bytes, ptr);
- *   const view = Module.convertGLBToVox(ptr, bytes.length, ...);
- *   const copy = view.slice();
- *   Module._free(ptr);
  */
-static val convertGLBToVox(int glbPtr, int glbLen, int palPtr, int palLen,
+static val convertGLBToVox(const std::string &glb, const std::string &palRGBA,
                            int gridSize, float rotX, float rotY) {
   gridSize = std::max(1, std::min(256, gridSize));
 
-  EM_ASM(
-      {
-        console.log(
-            '[C++] convertGLBToVox: glbPtr=%d glbLen=%d palLen=%d grid=%d rotX=%f rotY=%f', $0,
-            $1, $2, $3, $4, $5);
-      },
-      glbPtr, glbLen, palLen, gridSize, rotX, rotY);
-
-  // Build C++ vectors directly from the already-copied Wasm heap regions.
-  auto glbBytes =
-      std::vector<uint8_t>(reinterpret_cast<uint8_t *>(glbPtr),
-                           reinterpret_cast<uint8_t *>(glbPtr) + glbLen);
-  auto palBytes =
-      std::vector<uint8_t>(reinterpret_cast<uint8_t *>(palPtr),
-                           reinterpret_cast<uint8_t *>(palPtr) + palLen);
-
-  EM_ASM(
-      { console.log('[C++] first bytes: %d %d %d %d', $0, $1, $2, $3); },
-      glbBytes.empty() ? -1 : glbBytes[0],
-      glbBytes.size() > 1 ? glbBytes[1] : -1,
-      glbBytes.size() > 2 ? glbBytes[2] : -1,
-      glbBytes.size() > 3 ? glbBytes[3] : -1);
-
-  auto tris = parseGLTF(glbBytes, rotX, rotY);
-
-  EM_ASM({ console.log('[C++] triangles parsed:', $0); }, (int)tris.size());
-
-  auto pal = parsePaletteRGBA(palBytes);
-
-  // useMatColor = true  → no Lospec palette supplied; map each triangle's
-  //                        extracted baseColorFactor to the nearest entry in
-  //                        the default 6×6×6 RGB cube.
-  // useMatColor = false → Lospec palette supplied; use height-gradient
-  //                        index scheme (existing behaviour).
-  const bool useMatColor = true; // Always map to nearest color
-
-  EM_ASM({ console.log('[C++] useMatColor:', $0); }, (int)useMatColor);
-
-  auto grid = voxelise(tris, gridSize, pal, useMatColor);
+  auto pal = parsePaletteRGBA(palRGBA);
+  auto grid = voxelise(parseGLTF(glb, rotX, rotY), gridSize, pal);
   g_result = encodeVox(grid, pal);
 
   return val(typed_memory_view(g_result.size(), g_result.data()));

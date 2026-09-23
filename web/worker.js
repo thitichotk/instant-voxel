@@ -6,11 +6,11 @@
  *     Eagerly initialise the Wasm module (warm-up). Safe to post multiple times.
  *
  *   { type: 'convert', id: number, glbBuffer: ArrayBuffer,
- *     palBuffer: ArrayBuffer, gridSize: number }
+ *     palBuffer: ArrayBuffer, gridSize: number, rotX: number, rotY: number }
  *     Run voxelisation. glbBuffer is a transferred ArrayBuffer of the raw
- *     .glb/.gltf bytes.  palBuffer is a transferred ArrayBuffer of flat RGBA
- *     bytes (n×4, built by main.js from the Lospec API result). Either may be
- *     zero-length.
+ *     .glb bytes.  palBuffer holds flat RGBA bytes (256×4, built by main.js
+ *     from the uploaded .hex palette), or is zero-length for the default
+ *     palette.
  *
  * Protocol (worker → main thread):
  *   { type: 'ready' }
@@ -31,11 +31,7 @@ let initPromise = null;
 function initModule() {
     if (initPromise) return initPromise;
 
-    initPromise = VoxelizerModule({
-        locateFile: (path) => new URL(path, import.meta.url).href,
-        print:    (...args) => console.log('[wasm]',  ...args),
-        printErr: (...args) => console.warn('[wasm]', ...args),
-    }).then((mod) => {
+    initPromise = VoxelizerModule().then((mod) => {
         Module = mod;
         self.postMessage({ type: 'ready' });
     }).catch((err) => {
@@ -50,42 +46,14 @@ function initModule() {
 
 // ── Conversion handler ────────────────────────────────────────────────────────
 
-async function runConvert({ id, glbBuffer, palBuffer, gridSize, rotX, rotY, exportFormat }) {
+async function runConvert({ id, glbBuffer, palBuffer, gridSize, rotX, rotY }) {
     try {
         await initModule();
 
-        const glbBytes = new Uint8Array(glbBuffer);
-        const palBytes = new Uint8Array(palBuffer);
-
-        console.log('[worker] glbBytes.byteLength:', glbBytes.byteLength,
-                    '| _malloc:', typeof Module._malloc,
-                    '| HEAPU8:', Module.HEAPU8 ? 'ok len='+Module.HEAPU8.length : 'MISSING');
-
-        // Copy both buffers into Wasm memory via Module._malloc + HEAPU8.set.
-        // This is the canonical Emscripten pattern and avoids any val/TypedArray
-        // write-back issues in Emscripten 5.x.
-        const glbPtr = Module._malloc(glbBytes.byteLength || 1);
-        if (glbBytes.byteLength) Module.HEAPU8.set(glbBytes, glbPtr);
-
-        const palPtr = Module._malloc(palBytes.byteLength || 1);
-        if (palBytes.byteLength) Module.HEAPU8.set(palBytes, palPtr);
-
-        // convertGLBToVox(glbPtr, glbLen, palPtr, palLen, gridSize, rotX, rotY, exportFormat) → typed_memory_view
-        //
+        // Embind copies both buffers into Wasm memory (std::string params).
         // The return value is a live view into g_result (a module-level static
-        // vector). We must .slice() before freeing or making another call.
-        const memView  = Module.convertGLBToVox(
-            glbPtr, glbBytes.byteLength,
-            palPtr, palBytes.byteLength,
-            gridSize,
-            rotX || 0,
-            rotY || 0,
-            exportFormat || 0
-        );
-        const voxBytes = memView.slice();
-
-        Module._free(glbPtr);
-        Module._free(palPtr);
+        // vector), so .slice() it before making another call.
+        const voxBytes = Module.convertGLBToVox(glbBuffer, palBuffer, gridSize, rotX, rotY).slice();
 
         // Zero-copy transfer back to the main thread.
         self.postMessage(

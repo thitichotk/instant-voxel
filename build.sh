@@ -51,13 +51,7 @@ COMMON=(
     -s EXPORT_ES6=1
 
     # ── Misc ──────────────────────────────────────────────────────────────────
-    -s FORCE_FILESYSTEM=0          # no virtual FS needed (GLB loaded from JS)
-    -s INCOMING_MODULE_JS_API=[]   # silence unused-import warnings
-
-    # Expose malloc/free and HEAPU8 so worker.js can copy ArrayBuffers into
-    # Wasm memory without relying on Embind's typed_memory_view write path.
-    -s EXPORTED_FUNCTIONS=_malloc,_free
-    -s EXPORTED_RUNTIME_METHODS=HEAPU8
+    -s INCOMING_MODULE_JS_API=[]   # VoxelizerModule() takes no options
 )
 
 # ─── debug flags (passed with ./build.sh --debug) ────────────────────────────
@@ -73,14 +67,13 @@ DEBUG=(
 EXTRA_FLAGS=()
 if [[ "${1:-}" == "--debug" ]]; then
     echo ">>> Debug build"
-    # Override -O3 with -O0 and add checks
-    COMMON[1]="-O0"   # slot 1 = -O3
-    EXTRA_FLAGS=("${DEBUG[@]}")
+    EXTRA_FLAGS=("${DEBUG[@]}")   # its -O0 comes last, so it overrides -O3
 else
     echo ">>> Release build"
 fi
 
-emcc "${COMMON[@]}" ${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"} \
+# em++ (not emcc) so the C++ standard library is linked.
+em++ "${COMMON[@]}" ${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"} \
      -o "${OUT}.js" \
      "${SRC}"
 
@@ -88,27 +81,3 @@ echo ""
 echo "✓ Build complete:"
 echo "    ${OUT}.js"
 echo "    ${OUT}.wasm"
-echo ""
-echo "─────────────────────────────────────────────────────────────────────────"
-echo " IMPORTANT — Cross-Origin Isolation headers required"
-echo "─────────────────────────────────────────────────────────────────────────"
-echo " SharedArrayBuffer (needed by pthreads/OpenMP) is only available when"
-echo " the page is cross-origin isolated. Your server MUST send:"
-echo ""
-echo "   Cross-Origin-Opener-Policy:   same-origin"
-echo "   Cross-Origin-Embedder-Policy: credentialless"
-echo ""
-echo " NOTE: 'credentialless' (not 'require-corp') is used so that the"
-echo " Lospec palette API can be fetched cross-origin without CORP headers."
-echo " It still satisfies SharedArrayBuffer requirements in Chrome, Firefox,"
-echo " and Safari 15.2+."
-echo ""
-echo " The included Node.js dev server (server/server.js) sets these headers."
-echo " For Nginx add to the location block:"
-echo "   add_header Cross-Origin-Opener-Policy   'same-origin';"
-echo "   add_header Cross-Origin-Embedder-Policy 'credentialless';"
-echo ""
-echo " For Apache add to .htaccess or VirtualHost:"
-echo "   Header always set Cross-Origin-Opener-Policy   'same-origin'"
-echo "   Header always set Cross-Origin-Embedder-Policy 'credentialless'"
-echo "─────────────────────────────────────────────────────────────────────────"
