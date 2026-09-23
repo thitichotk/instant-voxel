@@ -199,22 +199,5 @@
 
 <script type="module" src="./main.js"></script>
 
-<!-- Stats + overlay wiring (kept separate to avoid circular imports) -->
-<script type="module">
-  const overlay         = document.getElementById('hint-overlay');
-  const statCount       = document.getElementById('stat-count');
-  const statSize        = document.getElementById('stat-size');
-  const statBytes       = document.getElementById('stat-bytes');
-
-  document.addEventListener('vox-updated', (e) => {
-    const { voxCount, sizeX, sizeY, sizeZ, byteLen } = e.detail;
-    overlay.classList.add('hidden');
-    statCount.textContent = voxCount.toLocaleString();
-    statSize.textContent  = `${sizeX} × ${sizeY} × ${sizeZ}`;
-    const kb = byteLen >= 1024 ? `${(byteLen / 1024).toFixed(1)} KB` : `${byteLen} B`;
-    statBytes.textContent = kb;
-  });
-</script>
-
 </body>
 </html>

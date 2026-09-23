@@ -36,19 +36,11 @@ function parseVox(buffer) {
     if (id4(0) !== 'VOX ') throw new Error('Not a valid .vox file (bad magic).');
     // version = u32(4)  — accepted but not checked
 
-    // ── default MagicaVoxel palette (used when no RGBA chunk present)
-    const defaultPal = new Uint8Array(256 * 4);
-    for (let i = 0; i < 256; i++) {
-        defaultPal[i*4+0] = Math.min(255, (i & 7)  * 36);
-        defaultPal[i*4+1] = Math.min(255, ((i>>3) & 7) * 36);
-        defaultPal[i*4+2] = Math.min(255, ((i>>6) & 3) * 85);
-        defaultPal[i*4+3] = 255;
-    }
-
+    // encodeVox (voxelizer.cpp) always writes SIZE, XYZI and RGBA chunks.
     const result = {
         size:    { x: 1, y: 1, z: 1 },
         voxels:  null,
-        palette: defaultPal,
+        palette: null,
     };
 
     // ── recursive chunk walker ──────────────────────────────────────────────
@@ -99,7 +91,6 @@ function parseVox(buffer) {
 
 let renderer, scene, camera, controls;
 let instMesh  = null;     // current InstancedMesh
-let animFrame = null;
 let currentVoxels = null;
 let currentPalette = null;
 let paintMode = false;
@@ -108,15 +99,10 @@ let paintColorIndex = 1; // 1-based palette index
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
-const VOXEL_SIZE   = 1.0;
-const VOXEL_GAP    = 0.0;    // no gap between cubes
-const UNIT          = VOXEL_SIZE + VOXEL_GAP;
-const MAX_INSTANCES = 256 * 256 * 256;   // absolute upper bound
-
 // Reusable dummy object to compute matrices
 const _dummy  = new THREE.Object3D();
 const _color  = new THREE.Color();
-const _boxGeo = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+const _boxGeo = new THREE.BoxGeometry();   // 1×1×1: one voxel per world unit
 
 let isLinesEnabled = false;
 
@@ -149,7 +135,6 @@ export function setBlockLines(enabled) {
     isLinesEnabled = enabled;
     if (instMesh) {
         instMesh.material.map = isLinesEnabled ? edgeTexture : null;
-        instMesh.material.color.setHex(0xffffff);
         instMesh.material.needsUpdate = true;
     }
 }
@@ -160,8 +145,6 @@ function createTextSprite(text) {
     canvas.width = 256;
     canvas.height = 64;
     const ctx = canvas.getContext('2d');
-    
-    ctx.imageSmoothingEnabled = true;
 
     // Minimal text styling, matching the subtle grid helpers
     ctx.font = '600 28px "Plus Jakarta Sans", sans-serif';
@@ -181,9 +164,7 @@ function createTextSprite(text) {
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
-    texture.generateMipmaps = true;
-    texture.minFilter = THREE.LinearMipmapLinearFilter;
-    const material = new THREE.SpriteMaterial({ 
+    const material = new THREE.SpriteMaterial({
         map: texture, 
         depthTest: false,
         transparent: true,
@@ -201,7 +182,7 @@ function createTextSprite(text) {
 
 export async function initPreview(container) {
     // ── renderer
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.shadowMap.enabled = true;
@@ -212,7 +193,6 @@ export async function initPreview(container) {
     // ── scene
     scene = new THREE.Scene();
     scene.background = new THREE.Color('#f5f5f7');
-    scene.fog        = null;   // no fog — prevents fade-out on zoom-out
 
     // ── camera
     camera = new THREE.PerspectiveCamera(
@@ -249,7 +229,6 @@ export async function initPreview(container) {
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
-    controls.target.set(0, 0, 0);
 
     // ── paint interactions
     let isDragging = false;
@@ -261,13 +240,9 @@ export async function initPreview(container) {
         hasMoved = false;
     });
 
-    container.addEventListener('pointermove', (e) => {
-        if (!paintMode || !instMesh || !isDragging) {
-            if (isDragging) hasMoved = true;
-            return;
-        }
-        hasMoved = true;
-        // Optionally allow drag-painting here, but for now just wait for pointerup to avoid spam
+    // Any movement while pressed is a camera drag, not a paint click.
+    container.addEventListener('pointermove', () => {
+        if (isDragging) hasMoved = true;
     });
 
     container.addEventListener('pointerup', (e) => {
@@ -301,10 +276,6 @@ export async function initPreview(container) {
                     voxelMap.set((x << 16) | (y << 8) | z, i);
                 }
 
-                // 2. Setup BFS queue
-                const queue = [startInstanceId];
-                const visited = new Set([startInstanceId]);
-                
                 const dirs = [
                     [1,0,0], [-1,0,0],
                     [0,1,0], [0,-1,0],
@@ -319,13 +290,20 @@ export async function initPreview(container) {
                     THREE.SRGBColorSpace
                 );
 
-                // 3. Flood fill connected voxels of the target color
+                // 2. Flood fill (BFS) connected voxels of the target color.
+                //    Voxels are painted as they are queued; the paint colour
+                //    differs from the target, so the colour check alone keeps
+                //    a voxel from being queued twice.
+                const queue = [];
+                const paint = (id) => {
+                    currentVoxels[id * 4 + 3] = paintColorIndex;
+                    instMesh.setColorAt(id, _color);
+                    queue.push(id);
+                };
+                paint(startInstanceId);
+
                 while (queue.length > 0) {
                     const currId = queue.shift();
-                    
-                    // Paint current instance
-                    currentVoxels[currId * 4 + 3] = paintColorIndex;
-                    instMesh.setColorAt(currId, _color);
 
                     const cx = currentVoxels[currId * 4 + 0];
                     const cy = currentVoxels[currId * 4 + 1];
@@ -340,20 +318,15 @@ export async function initPreview(container) {
                         if (nx >= 0 && nx <= 255 && ny >= 0 && ny <= 255 && nz >= 0 && nz <= 255) {
                             const key = (nx << 16) | (ny << 8) | nz;
                             const neighborId = voxelMap.get(key);
-                            
-                            if (neighborId !== undefined && !visited.has(neighborId)) {
-                                if (currentVoxels[neighborId * 4 + 3] === targetColorIndex) {
-                                    visited.add(neighborId);
-                                    queue.push(neighborId);
-                                }
+
+                            if (neighborId !== undefined && currentVoxels[neighborId * 4 + 3] === targetColorIndex) {
+                                paint(neighborId);
                             }
                         }
                     }
                 }
-                
-                if (instMesh.instanceColor) {
-                    instMesh.instanceColor.needsUpdate = true;
-                }
+
+                instMesh.instanceColor.needsUpdate = true;
             }
         }
     });
@@ -375,21 +348,11 @@ export async function initPreview(container) {
     // Add Axes Helper and Labels
     scene.add(new THREE.AxesHelper(100)); // Shows Origin
 
-    const labelX = createTextSprite('X');
-    labelX.position.set(110, 0, 0);
-    scene.add(labelX);
-
-    const labelZ = createTextSprite('Z');
-    labelZ.position.set(0, 0, 110);
-    scene.add(labelZ);
-
-    const labelNX = createTextSprite('-X');
-    labelNX.position.set(-110, 0, 0);
-    scene.add(labelNX);
-
-    const labelNZ = createTextSprite('-Z');
-    labelNZ.position.set(0, 0, -110);
-    scene.add(labelNZ);
+    for (const [text, x, z] of [['X', 110, 0], ['Z', 0, 110], ['-X', -110, 0], ['-Z', 0, -110]]) {
+        const label = createTextSprite(text);
+        label.position.set(x, 0, z);
+        scene.add(label);
+    }
 
     // ── resize observer
     const ro = new ResizeObserver(() => {
@@ -401,11 +364,10 @@ export async function initPreview(container) {
     ro.observe(container);
 
     // ── render loop
-    (function loop() {
-        animFrame = requestAnimationFrame(loop);
+    renderer.setAnimationLoop(() => {
         controls.update();
         renderer.render(scene, camera);
-    })();
+    });
 }
 
 // ── Update InstancedMesh with new VOX data ───────────────────────────────────
@@ -415,8 +377,9 @@ export async function initPreview(container) {
  *
  * Called from main.js whenever the worker returns a new VOX ArrayBuffer.
  * Parses the binary, then:
- *   • If the voxel count fits the existing InstancedMesh, only patch buffers.
- *   • If count changed significantly, rebuild the mesh.
+ *   • If the voxel count grew since the last update, rebuild the mesh (and
+ *     reframe the camera).
+ *   • Otherwise only patch the existing InstancedMesh buffers.
  */
 export async function updatePreview(voxBuffer) {
     // Parse the original buffer so that we can directly modify it when painting
@@ -434,8 +397,9 @@ export async function updatePreview(voxBuffer) {
 
     const count = voxels.length / 4;   // 4 bytes per voxel entry
 
-    // ── (Re)create InstancedMesh when count capacity needs changing ──────────
-    const needRebuild = !instMesh || instMesh.count < count || instMesh.instanceMatrix.array.length < count * 16;
+    // ── (Re)create InstancedMesh when the count outgrows the last update's ────
+    //  (instMesh.count never exceeds the capacity, so that's the only check.)
+    const needRebuild = !instMesh || count > instMesh.count;
 
     if (needRebuild) {
         if (instMesh) {
@@ -451,12 +415,8 @@ export async function updatePreview(voxBuffer) {
             metalness: 0.0
         });
 
-        // Allocate with a small headroom so minor count fluctuations don't
-        // trigger a full rebuild every slider tick.
-        const capacity = Math.min(MAX_INSTANCES, Math.max(count, Math.ceil(count * 1.2)));
-        instMesh = new THREE.InstancedMesh(_boxGeo, mat, capacity);
+        instMesh = new THREE.InstancedMesh(_boxGeo, mat, count);
         instMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        instMesh.instanceColor?.setUsage(THREE.DynamicDrawUsage);
         // Enable soft self-shadowing (acne prevented by sun bias)
         instMesh.castShadow    = true;
         instMesh.receiveShadow = true;
@@ -464,9 +424,9 @@ export async function updatePreview(voxBuffer) {
     }
 
     // ── Half-extents used to centre the mesh at world origin ─────────────────
-    const cx = (size.x * UNIT) / 2;
-    const cy = (size.z * UNIT) / 2;   // VOX Z → Three world Y
-    const cz = (size.y * UNIT) / 2;
+    const cx = size.x / 2;
+    const cy = size.z / 2;   // VOX Z → Three world Y
+    const cz = size.y / 2;
 
     // ── Batch-write matrices + colours ───────────────────────────────────────
     for (let i = 0; i < count; i++) {
@@ -477,7 +437,7 @@ export async function updatePreview(voxBuffer) {
 
         // VOX axes: X right, Y forward, Z up → Three.js Y up convention.
         // Raw positions only — the mesh.position offset centres everything.
-        _dummy.position.set(vx * UNIT, vz * UNIT, vy * UNIT);
+        _dummy.position.set(vx, vz, vy);
         _dummy.updateMatrix();
         instMesh.setMatrixAt(i, _dummy.matrix);
 
@@ -502,7 +462,7 @@ export async function updatePreview(voxBuffer) {
     //  renderer skips drawing unset tail instances from a previous larger mesh.
     instMesh.count                    = count;
     instMesh.instanceMatrix.needsUpdate = true;
-    if (instMesh.instanceColor) instMesh.instanceColor.needsUpdate = true;
+    instMesh.instanceColor.needsUpdate = true;   // setColorAt above created it
     instMesh.visible                  = true;
     instMesh.computeBoundingSphere();
 

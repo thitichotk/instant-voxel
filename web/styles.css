@@ -24,21 +24,10 @@
       --outline-variant:       rgba(195, 200, 189, 0.15);
 
       --font:         "Plus Jakarta Sans", sans-serif;
-      --radius-xl:    3rem;
       --radius-lg:    2rem;
-      --radius-md:    1rem;
       --radius-full:  9999px;
 
-      --spacing-2: 0.75rem;
-      --spacing-4: 1.4rem;
-      --spacing-6: 2rem;
-      --spacing-8: 3rem;
-
-      --panel-w:      23.5rem;    /* 22rem width + 1.5rem offset */
-
       --shadow-ambient:  0 20px 40px rgba(71, 102, 67, 0.06);
-      --shadow-nav-top:  0 4px 24px rgba(71, 102, 67, 0.06);
-      --shadow-panel:   -20px 0 40px rgba(71, 102, 67, 0.04);
     }
 
     /* ── Base ────────────────────────────────────────────────────────── */
@@ -65,10 +54,7 @@
     ═══════════════════════════════════════════════════════════════════ */
     #canvas-container {
       position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
+      inset: 0;
       z-index: 0;
       background: var(--surface-bg);
     }
@@ -161,10 +147,7 @@
     /* ── Hint overlay ────────────────────────────────────────────────── */
     #hint-overlay {
       position: absolute;
-      top: 0;
-      left: 0;
-      bottom: 0;
-      right: 0;
+      inset: 0;
       z-index: 3;
       display: flex;
       flex-direction: column;
@@ -238,12 +221,6 @@
       bottom: 1.25rem;
       left: 1.25rem;
       align-items: flex-start;
-    }
-
-    .stats-card {
-      min-width: unset;
-      justify-content: center;
-      padding: 0.6rem 1rem;
     }
 
     /* ── Panel header ────────────────────────────────────────────────── */
@@ -631,8 +608,6 @@
       font-size: 18px!important;
       color: var(--on-secondary-container);
     }
-
-    #export-size-display { /* dynamic, updated by JS event */ }
 
     /* ── Panel footer ────────────────────────────────────────────────── */
     .panel-footer {
