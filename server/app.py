@@ -1,4 +1,4 @@
-"""VOXY model server — the job API the web app's "Model server" provider speaks.
+"""Instant-Voxel model server: the job API the web app's "Model server" provider speaks.
 
     GET  /v1/health            → { ok, device, image: true, text: true }
     POST /v1/jobs              multipart: image? (PNG/JPEG/WebP ≤ 10 MB), prompt?, seed?  → 202 { id }
@@ -16,6 +16,7 @@ SaaS would swap in a persistent queue and object storage behind the same API.
 import io
 import os
 import queue
+import secrets
 import threading
 import uuid
 from collections import OrderedDict
@@ -33,17 +34,17 @@ MAX_QUEUED = 8
 KEEP_JOBS = 32
 ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS",
-    "http://127.0.0.1:3000,http://localhost:3000,https://thitichotk.github.io,https://voxel.thitichotk.com",
+    "http://127.0.0.1:3000,http://localhost:3000,https://instantvoxel.thitichotk.com",
 ).split(",")
 API_KEY = os.environ.get("API_KEY")
 
-app = FastAPI(title="VOXY model server")
+app = FastAPI(title="Instant-Voxel model server")
 app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "POST"], allow_headers=["Authorization"])
 
 
 @app.middleware("http")
 async def private_network(request: Request, call_next):
-    # Chrome asks before a public page (e.g. GitHub Pages) may call a local server.
+    # Chrome asks before a public page (the live site) may call a local server.
     response = await call_next(request)
     if request.headers.get("access-control-request-private-network"):
         response.headers["Access-Control-Allow-Private-Network"] = "true"
@@ -51,7 +52,8 @@ async def private_network(request: Request, call_next):
 
 
 def authorized(request: Request):
-    if API_KEY and request.headers.get("authorization") != f"Bearer {API_KEY}":
+    sent = request.headers.get("authorization", "")
+    if API_KEY and not secrets.compare_digest(sent.encode(), f"Bearer {API_KEY}".encode()):
         raise HTTPException(401, "Missing or wrong API key.")
 
 

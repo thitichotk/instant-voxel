@@ -1,4 +1,4 @@
-"""Stand-ins for models.py when VOXY_FAKE_MODELS=1: a coloured cube GLB, no ML
+"""Stand-ins for models.py when FAKE_MODELS=1: a coloured cube GLB, no ML
 dependencies. Lets the job API and the web app be tested end to end."""
 
 import json
@@ -18,7 +18,7 @@ def _cube_glb(rgb):
     indices = [i for a, b, c, d in quads for i in (a, b, c, a, c, d)]
     binary = struct.pack("<24f", *positions) + struct.pack("<36H", *indices)
     doc = {
-        "asset": {"version": "2.0", "generator": "VOXY fake model"},
+        "asset": {"version": "2.0", "generator": "Instant-Voxel fake model"},
         "scene": 0,
         "scenes": [{"nodes": [0]}],
         "nodes": [{"mesh": 0}],

@@ -4,7 +4,7 @@ uvicorn>=0.30
 python-multipart>=0.0.9
 pillow>=10.0
 
-# Models (skip these to run with VOXY_FAKE_MODELS=1)
+# Models (skip these to run with FAKE_MODELS=1)
 torch>=2.4
 diffusers>=0.30
 transformers>=4.44
