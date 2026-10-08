@@ -1,6 +1,3 @@
-# Core voxelize source code logic
-src/
-
 .DS_Store
 
 # Model server: local virtualenv, cloned Stable Fast 3D, Python caches

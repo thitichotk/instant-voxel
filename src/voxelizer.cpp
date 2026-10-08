@@ -1,7 +1,7 @@
 /**
  * voxelizer.cpp
  *
- * VOXY's voxel kernel, exposed to JS via Emscripten Embind. three.js parses
+ * Instant-Voxel's voxel kernel, exposed to JS via Emscripten Embind. three.js parses
  * the model files and flattens them into one triangle mesh (web/loaders.js);
  * this file turns that mesh into a palette-indexed voxel grid.
  *
