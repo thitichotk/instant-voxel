@@ -158,6 +158,12 @@ test('.vox round-trip: one model, and a multi-model scene past 256', () => {
     }
 });
 
+test('the built-in sample (web/sample.vox) reads back with voxels and colours', () => {
+    const g = readVox(fs.readFileSync(new URL('../web/sample.vox', import.meta.url)));
+    assert.ok(countVoxels(g) > 1000 && Math.max(g.sx, g.sy, g.sz) <= 64);
+    assert.equal(g.palette[4 * g.data.find(Boolean) + 3], 255);
+});
+
 test('.vox axes: grid +y (up) is MagicaVoxel +z', () => {
     const g = makeGrid(1, 3, 1);
     g.data[index(g, 0, 2, 0)] = 5;    // top voxel

@@ -3,11 +3,11 @@
  *
  * Source (model files | image | .vox) → worker (voxel kernel, image → voxels,
  * in-browser AI, mesher) → Grid → preview, paint and export. Settings persist
- * in localStorage.
+ * in localStorage. The page opens on a built-in sample (sample.vox).
  */
 
 import * as THREE from 'three';
-import { initPreview, setGrid, remesh, setGhost, setView, pick, canvas, setToolMode, showBox } from './preview.js';
+import { initPreview, setGrid, remesh, setGhost, setView, pick, canvas, setToolMode, showBox, resetView } from './preview.js';
 import { loadModel, flatten, meshTransfer, MODEL_EXTS, ext } from './loaders.js';
 import { writeVox, readVox } from './vox.js';
 import { defaultCube, minecraftPalette, parseHex, usedColors } from './palettes.js';
@@ -24,7 +24,7 @@ const $ = (sel) => document.querySelector(sel);
 const DEFAULTS = {
     size: 64, axis: -1, fill: 'surface', hollow: 0, islands: 0,
     paletteMode: 'auto', colors: 255, dither: false,
-    rotX: 0, rotY: 0, lines: false, ghost: false,
+    rotX: 0, rotY: 0, lines: false, ghost: false, grid: true, spin: false,
     exportFormat: 'vox', voxelMM: 10,
     imageMode: 'pixel', depth: 8, background: 'depth', mirror: false,
     aiProvider: 'browser', aiUrl: 'http://127.0.0.1:8000', aiKey: '',
@@ -32,13 +32,15 @@ const DEFAULTS = {
 };
 
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
+const SETTINGS_KEY = 'instant-voxel.settings';
 const settings = { ...DEFAULTS, ...readSettings() };
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function readSettings() {
-    try { return JSON.parse(localStorage.getItem('voxy.settings')) ?? {}; } catch { return {}; }
+    try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) ?? {}; } catch { return {}; }
 }
 function saveSettings() {
-    try { localStorage.setItem('voxy.settings', JSON.stringify(settings)); } catch { /* private mode */ }
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* private mode */ }
 }
 
 // ── Application state ─────────────────────────────────────────────────────────
@@ -68,7 +70,7 @@ function startWorker() {
     worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
     worker.addEventListener('message', ({ data: msg }) => {
         if (msg.type === 'ready') {
-            if (!state.source) setStatus('Wasm ready.', 'ok');   // not after a cancel respawn
+            if (!state.source) setStatus('Ready', 'ok');   // not after a cancel respawn
         } else if (msg.type === 'progress') {
             setProgress(5 + 90 * msg.p);
             if (msg.msg) setStatus(msg.msg, 'info');
@@ -104,16 +106,11 @@ startWorker();
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
 
+/** level: 'info' (working, the dot pulses), 'ok' or 'error'. */
 function setStatus(msg, level = 'info') {
-    const dot  = $('#status-dot');
-    const text = $('#status-text');
-
-    text.textContent  = msg;
-    text.className    = level;
-    dot.className     = `status-dot ${level}`;
-
-    // Pulse the dot while converting.
-    if (level === 'info') dot.classList.add('pulse');
+    $('#status-text').textContent = msg;
+    $('#status').classList.toggle('error', level === 'error');
+    $('#status-dot').classList.toggle('busy', level === 'info');
 }
 
 function setProgress(pct) {
@@ -125,44 +122,46 @@ function debounce(fn, ms) {
     return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
-function updateSliderFill(slider) {
-    const min = parseFloat(slider.min);
-    const max = parseFloat(slider.max);
-    const val = parseFloat(slider.value);
-    const pct = ((val - min) / (max - min) * 100).toFixed(2);
-    slider.style.setProperty('--pct', `${pct}%`);
+const fmtTime = (ms) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
+const fmtBytes = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+const baseName = (name) => name.replace(/\.[^.]+$/, '');
+
+// Groups of aria-pressed buttons act as one choice; each button's data-v is its value.
+function press(group, value) {
+    for (const b of group.querySelectorAll('button[data-v]')) b.setAttribute('aria-pressed', String(b.dataset.v === value));
+}
+function onPress(group, fn) {
+    group.addEventListener('click', (e) => {
+        const b = e.target.closest('button[data-v]');
+        if (b && !b.disabled) fn(b.dataset.v);
+    });
 }
 
 function download(bytes, name, type = 'application/octet-stream') {
-    const a = Object.assign(document.createElement('a'), {
-        href:     URL.createObjectURL(new Blob([bytes], { type })),
-        download: name,
-    });
-    a.click();
-    URL.revokeObjectURL(a.href);
+    const url = URL.createObjectURL(new Blob([bytes], { type }));
+    Object.assign(document.createElement('a'), { href: url, download: name }).click();
+    // Revoking straight after click() can cancel the download in Safari and Firefox.
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 // ── Palette swatches & stats ──────────────────────────────────────────────────
 
 function renderSwatches(colors) {
-    const container = $('#palette-swatches');
     if (!colors.some((c) => c.index === state.paintIndex)) state.paintIndex = colors[0]?.index ?? 1;
-
-    container.innerHTML = colors.map(({ index, hex }) =>
-        `<div class="swatch ${index === state.paintIndex ? 'active' : ''}" style="background:${hex}" title="${hex}" data-index="${index}"></div>`
+    $('#palette-swatches').innerHTML = colors.map(({ index, hex }) =>
+        `<button type="button" style="--c:${hex}" aria-label="${hex}" title="${hex}" data-index="${index}" aria-pressed="${index === state.paintIndex}"></button>`
     ).join('');
-    container.classList.toggle('has-colors', colors.length > 0);
 }
 
-// Stats bar and swatches for the current grid (one pass over the voxels).
+// Dimensions, counts and swatches for the current grid (one pass over the voxels).
 function updateStats() {
     const g = state.grid;
     const { count, used } = summarize(g);
     const colors = usedColors(g, used);
-    $('#stat-count').textContent  = count.toLocaleString();
-    $('#stat-size').textContent   = `${g.sx} × ${g.sy} × ${g.sz}`;
-    $('#stat-colors').textContent = colors.length;
+    $('#dims').textContent = `${g.sx} × ${g.sy} × ${g.sz} · ${count.toLocaleString('en')} voxels`;
+    $('#stat-colors').textContent = `${colors.length} in use`;
     renderSwatches(colors);
+    return count;
 }
 
 function showGrid(grid, chunks) {
@@ -172,9 +171,9 @@ function showGrid(grid, chunks) {
     state.edited = false;
     updateUndoButtons();
     setGrid(grid, chunks, { reframe });
-    $('#hint-overlay').classList.add('hidden');
     $('#btn-download').disabled = false;
-    updateStats();
+    for (const b of $('#tools').querySelectorAll('button')) b.disabled = false;
+    return updateStats();
 }
 
 // ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -216,11 +215,12 @@ async function convert() {
 
     try {
         const src = state.source;
+        let count;
         if (src.kind === 'model') {
             src.pivot.rotation.set(settings.rotX * Math.PI / 180, settings.rotY * Math.PI / 180, 0);
             const mesh = flatten(src.pivot, textureCache);
             const { grid, chunks } = await runJob('voxelize', { mesh, opts: kernelOpts() }, meshTransfer(mesh));
-            showGrid(grid, chunks);
+            count = showGrid(grid, chunks);
             setGhost(src.pivot.clone(), grid.origin, grid.cell);
         } else if (src.kind === 'image') {
             const px = pixelsOf(src.bitmap, settings.size, settings.imageMode === 'pixel');
@@ -230,23 +230,23 @@ async function convert() {
             };
             const op = settings.imageMode === 'photo' ? 'relief' : 'image';
             const { grid, chunks } = await runJob(op, { ...px, opts }, [px.rgba.buffer]);
-            showGrid(grid, chunks);
+            count = showGrid(grid, chunks);
             setGhost(null);
         } else {
             const copy = { ...src.grid, data: src.grid.data.slice() };
             const { grid, chunks } = await runJob('mesh', { grid: copy }, [copy.data.buffer]);
-            showGrid(grid, chunks);
+            count = showGrid(grid, chunks);
             setGhost(null);
         }
         setProgress(100);
-        setStatus(`Done in ${((performance.now() - t0) / 1000).toFixed(1)} s`, 'ok');
+        setStatus(`Ready · ${count.toLocaleString('en')} voxels in ${fmtTime(performance.now() - t0)}`, 'ok');
     } catch (err) {
         const cancelled = err.message === 'Cancelled.';
         setStatus(err.message, cancelled ? 'ok' : 'error');
         if (!cancelled) console.error('[main] conversion error:', err);
     } finally {
         state.busy = false;
-        $('#btn-convert').disabled = !state.source;
+        $('#btn-convert').disabled = !state.source || state.source.kind === 'grid';
         $('#btn-cancel').hidden = true;
         setTimeout(() => setProgress(0), 900);
         if (state.queued) convert();
@@ -259,12 +259,18 @@ const debouncedConvert = debounce(convert, 150);
 function setSource(source) {
     state.source = source;
     cancelJob();
-    $('#btn-convert').disabled = false;
     syncControls();
     convert();
 }
 
 // ── Opening files ─────────────────────────────────────────────────────────────
+
+function showSource(name, meta, icon = 'view_in_ar') {
+    $('#source-name').textContent = name;
+    $('#source-meta').textContent = meta;
+    $('#source-icon').textContent = icon;
+    $('#source-file').hidden = false;
+}
 
 async function openFiles(fileList) {
     const files = [...fileList];
@@ -276,11 +282,11 @@ async function openFiles(fileList) {
         const models = files.filter((f) => ext(f.name) !== 'hex');
         const isModel = models.some((f) => MODEL_EXTS.includes(ext(f.name)));
         if (vox) {
-            setSource({ kind: 'grid', name: vox.name.replace(/\.[^.]+$/, ''), grid: readVox(await vox.arrayBuffer()) });
-            showSourceName(vox.name);
+            setSource({ kind: 'grid', name: baseName(vox.name), grid: readVox(await vox.arrayBuffer()) });
+            showSource(vox.name, fmtBytes(vox.size));
         } else if (image && !isModel) {
-            showSourceName(image.name);
-            setSource({ kind: 'image', name: image.name.replace(/\.[^.]+$/, ''), bitmap: await createImageBitmap(image) });
+            showSource(image.name, fmtBytes(image.size), 'image');
+            setSource({ kind: 'image', name: baseName(image.name), bitmap: await createImageBitmap(image) });
         } else if (isModel) {
             setStatus('Loading model…', 'info');
             const object = await loadModel(models);
@@ -288,8 +294,8 @@ async function openFiles(fileList) {
             pivot.add(object);
             textureCache.clear();
             const main = models.find((f) => MODEL_EXTS.includes(ext(f.name)));
-            showSourceName(models.length > 1 ? `${main.name} +${models.length - 1}` : main.name);
-            setSource({ kind: 'model', name: main.name.replace(/\.[^.]+$/, ''), pivot });
+            showSource(models.length > 1 ? `${main.name} +${models.length - 1}` : main.name, fmtBytes(main.size));
+            setSource({ kind: 'model', name: baseName(main.name), pivot });
         } else if (!hex) {
             throw new Error(`Unsupported file: ${files.map((f) => f.name).join(', ')}`);
         }
@@ -299,67 +305,87 @@ async function openFiles(fileList) {
     }
 }
 
-function showSourceName(name) {
-    $('#drop-name-model').textContent = name;
-    $('#drop-zone-model').classList.add('loaded');
-}
-
 async function loadHex(file) {
     const { palette } = parseHex(await file.text());
     state.hex = { name: file.name, palette };
-    settings.paletteMode = 'hex';
-    saveSettings();
-    syncControls();
     $('#drop-name-pal').textContent = file.name;
-    $('#drop-zone-pal').classList.add('loaded');
+    change('paletteMode', 'hex', { kinds: ['model', 'image'] });
     setStatus(`Palette "${file.name}" loaded.`, 'ok');
-    if (state.source?.kind === 'model') debouncedConvert();
+}
+
+async function openSample() {
+    try {
+        const res = await fetch('sample.vox');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        setSource({ kind: 'grid', name: 'sample-island', grid: readVox(await res.arrayBuffer()) });
+        showSource('sample-island.vox', 'built in');
+    } catch (err) {
+        console.warn('[main] sample not loaded:', err);
+        setStatus('Ready. Drop a model or image to start.', 'ok');
+    }
 }
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 
-// Reflect settings in the controls (on load, and after code changes a setting).
+// Reflect settings and state in the controls (on load, and after code changes a setting).
 function syncControls() {
-    for (const id of ['size', 'axis', 'hollow', 'islands', 'colors', 'depth', 'brush']) $(`#${id}`).value = settings[id];
-    $('#brush-value').textContent = settings.brush;
-    $('#mirror-x').checked = settings.mirrorX;
-    $('#mirror-z').checked = settings.mirrorZ;
-    for (const r of document.querySelectorAll('input[name="box-op"]')) r.checked = r.value === settings.boxOp;
-    $('#image-mode').value = settings.imageMode;
-    $('#background').value = settings.background;
-    $('#mirror').checked = settings.mirror;
-    const image = state.source?.kind === 'image';
-    $('#model-fields').hidden = image;
-    $('#image-fields').hidden = !image;
+    for (const [id, key] of [['#size', 'size'], ['#axis', 'axis'], ['#hollow', 'hollow'], ['#islands', 'islands'],
+        ['#colors', 'colors'], ['#depth', 'depth'], ['#brush', 'brush'], ['#image-mode', 'imageMode'],
+        ['#background', 'background'], ['#export-format', 'exportFormat'], ['#voxel-mm', 'voxelMM']])
+        $(id).value = settings[key];
+    for (const [id, key] of [['#size-value', 'size'], ['#colors-value', 'colors'], ['#brush-value', 'brush']])
+        $(id).textContent = settings[key];
+    for (const [id, key] of [['#mirror', 'mirror'], ['#dither', 'dither'], ['#mirror-x', 'mirrorX'], ['#mirror-z', 'mirrorZ'],
+        ['#toggle-lines', 'lines'], ['#toggle-ghost', 'ghost'], ['#toggle-grid', 'grid'], ['#toggle-spin', 'spin']])
+        $(id).checked = settings[key];
+    press($('#fill'), settings.fill);
+    press($('#box-op'), settings.boxOp);
+    press($('#palette-mode'), settings.paletteMode);
+    press($('#ai-provider'), settings.aiProvider);
+
+    const kind = state.source?.kind;
+    $('#model-fields').hidden = kind === 'image';
+    $('#image-fields').hidden = kind !== 'image';
     $('#field-background').hidden = $('#field-mirror').hidden = settings.imageMode !== 'photo';
+    $('#field-hollow').hidden = settings.fill !== 'solid';
+    $('#field-colors').hidden = settings.paletteMode !== 'auto';
+    $('#drop-pal').hidden = settings.paletteMode !== 'hex';
+    $('#field-dither').hidden = kind === 'image';
+    $('#btn-convert').disabled = state.busy || !state.source || kind === 'grid';
+    $('#btn-rotate-x').disabled = $('#btn-rotate-y').disabled = kind !== 'model';
+
     const server = settings.aiProvider === 'server';
-    $('#ai-provider').value = settings.aiProvider;
     $('#ai-url').value = settings.aiUrl;
     $('#ai-key').value = settings.aiKey;
     $('#ai-server-fields').hidden = $('#ai-note').hidden = !server;
-    $('#drop-hint-ai').textContent = server ? 'Optional with a prompt' : 'Becomes a voxel relief';
-    $('#export-format').value = settings.exportFormat;
-    $('#voxel-mm').value = settings.voxelMM;
+    $('#drop-hint-ai').textContent = server ? 'Optional with a prompt' : 'Becomes a voxel relief, made on your GPU';
+
     $('#field-voxel-mm').hidden = !['glb', 'obj', 'stl'].includes(settings.exportFormat);
     $('#download-label').textContent = `Download .${settings.exportFormat}`;
-    $('#palette-mode').value = settings.paletteMode;
-    $('#dither').checked = settings.dither;
-    $('#toggle-lines').checked = settings.lines;
-    $('#toggle-ghost').checked = settings.ghost;
-    for (const r of document.querySelectorAll('input[name="fill"]')) r.checked = r.value === settings.fill;
-    $('#size-value').textContent = settings.size;
-    $('#colors-value').textContent = settings.colors;
-    $('#field-hollow').hidden = settings.fill !== 'solid';
-    $('#field-colors').hidden = settings.paletteMode !== 'auto';
-    $('#drop-zone-pal').hidden = settings.paletteMode !== 'hex';
-    document.querySelectorAll('input[type="range"]').forEach(updateSliderFill);
-    setView({ lines: settings.lines, ghost: settings.ghost });
+    $('#toggle-spin').disabled = reducedMotion;
+    setView({ lines: settings.lines, ghost: settings.ghost, grid: settings.grid, spin: settings.spin && !reducedMotion });
 }
+
+/**
+ * Apply a setting. When it changes how the current source voxelises (`kinds`),
+ * confirm before dropping edits, then re-run: at once, or debounced while a
+ * slider is dragged (`live`).
+ */
+function change(key, value, { kinds = [], live = false } = {}) {
+    const rerun = kinds.includes(state.source?.kind);
+    if (rerun && keepEdits()) return syncControls();
+    settings[key] = value;
+    saveSettings();
+    syncControls();
+    if (rerun) live ? debouncedConvert() : convert();
+}
+
+const MODEL = ['model'], IMAGE = ['image'], BOTH = ['model', 'image'];
 
 function wireDom() {
     // Sources: pickers and drop-anywhere.
-    $('#input-model').addEventListener('change', (e) => openFiles(e.target.files));
-    $('#input-pal').addEventListener('change', (e) => e.target.files[0] && openFiles(e.target.files));
+    $('#input-model').addEventListener('change', (e) => e.target.files.length && openFiles(e.target.files));
+    $('#input-pal').addEventListener('change', (e) => e.target.files.length && openFiles(e.target.files));
 
     let dragDepth = 0;
     const dragging = (on) => document.body.classList.toggle('dragging', on);
@@ -376,69 +402,45 @@ function wireDom() {
     });
 
     // Settings that re-voxelise.
-    const setting = (key, el, parse, { live = false } = {}) => () => {
-        if (keepEdits()) return syncControls();
-        settings[key] = parse(el.value);
-        saveSettings();
-        syncControls();
-        if (state.source && state.source.kind !== 'grid') live ? debouncedConvert() : convert();
-    };
     const count = (v) => Math.max(0, Math.round(Number(v) || 0));
-    $('#size').addEventListener('input', setting('size', $('#size'), Number, { live: true }));
-    $('#colors').addEventListener('input', setting('colors', $('#colors'), Number, { live: true }));
-    $('#axis').addEventListener('change', setting('axis', $('#axis'), Number));
-    $('#hollow').addEventListener('change', setting('hollow', $('#hollow'), count));
-    $('#islands').addEventListener('change', setting('islands', $('#islands'), count));
-    $('#palette-mode').addEventListener('change', setting('paletteMode', $('#palette-mode'), String));
-    $('#image-mode').addEventListener('change', setting('imageMode', $('#image-mode'), String));
-    $('#depth').addEventListener('change', setting('depth', $('#depth'), (v) => Math.min(256, Math.max(1, Math.round(Number(v) || 1)))));
-    $('#background').addEventListener('change', setting('background', $('#background'), String));
-    $('#mirror').addEventListener('change', (e) => {
-        if (keepEdits()) return syncControls();
-        settings.mirror = e.target.checked;
-        saveSettings();
-        if (state.source?.kind === 'image') convert();
-    });
-    for (const r of document.querySelectorAll('input[name="fill"]'))
-        r.addEventListener('change', setting('fill', r, String));
-    $('#dither').addEventListener('change', (e) => {
-        if (keepEdits()) return syncControls();
-        settings.dither = e.target.checked;
-        saveSettings();
-        if (state.source?.kind === 'model') convert();
-    });
+    const on = (id, type, key, parse, opts) => $(id).addEventListener(type, (e) => change(key, parse(e.target), opts));
+    const num = (el) => Number(el.value), str = (el) => el.value, checked = (el) => el.checked;
+    on('#size', 'input', 'size', num, { kinds: BOTH, live: true });
+    on('#colors', 'input', 'colors', num, { kinds: BOTH, live: true });
+    on('#axis', 'change', 'axis', num, { kinds: MODEL });
+    on('#hollow', 'change', 'hollow', (el) => count(el.value), { kinds: MODEL });
+    on('#islands', 'change', 'islands', (el) => count(el.value), { kinds: MODEL });
+    on('#dither', 'change', 'dither', checked, { kinds: MODEL });
+    on('#image-mode', 'change', 'imageMode', str, { kinds: IMAGE });
+    on('#depth', 'change', 'depth', (el) => Math.min(256, Math.max(1, Math.round(Number(el.value) || 1))), { kinds: IMAGE });
+    on('#background', 'change', 'background', str, { kinds: IMAGE });
+    on('#mirror', 'change', 'mirror', checked, { kinds: IMAGE });
+    onPress($('#fill'), (v) => change('fill', v, { kinds: MODEL }));
+    onPress($('#palette-mode'), (v) => change('paletteMode', v, { kinds: BOTH }));
 
     // View.
-    for (const [id, key] of [['#toggle-lines', 'lines'], ['#toggle-ghost', 'ghost']])
-        $(id).addEventListener('change', (e) => { settings[key] = e.target.checked; saveSettings(); setView({ [key]: e.target.checked }); });
+    for (const [id, key] of [['#toggle-lines', 'lines'], ['#toggle-ghost', 'ghost'], ['#toggle-grid', 'grid'], ['#toggle-spin', 'spin']])
+        on(id, 'change', key, checked);
     $('#clip').addEventListener('input', (e) => {
         $('#clip-value').textContent = `${e.target.value}%`;
-        updateSliderFill(e.target);
         setView({ clip: e.target.value / 100 });
     });
 
-    // Rotation gizmos.
+    // Rotation gizmos and the camera.
     for (const [id, key] of [['#btn-rotate-x', 'rotX'], ['#btn-rotate-y', 'rotY']])
-        $(id).addEventListener('click', () => {
-            if (state.source?.kind === 'model' && keepEdits()) return;
-            settings[key] = (settings[key] + 90) % 360;
-            saveSettings();
-            if (state.source?.kind === 'model') debouncedConvert();
-        });
+        $(id).addEventListener('click', () => change(key, (settings[key] + 90) % 360, { kinds: MODEL }));
+    $('#btn-reset').addEventListener('click', resetView);
+    $('#btn-help').addEventListener('click', () => $('#shortcuts').showModal());
 
     // Run & export.
     $('#btn-convert').addEventListener('click', () => keepEdits() || convert());
     $('#btn-cancel').addEventListener('click', () => { state.abort?.abort(); cancelJob(); });
-    $('#export-format').addEventListener('change', (e) => { settings.exportFormat = e.target.value; saveSettings(); syncControls(); });
-    $('#voxel-mm').addEventListener('change', (e) => {
-        settings.voxelMM = Math.max(0.01, Number(e.target.value) || DEFAULTS.voxelMM);
-        saveSettings();
-        syncControls();
-    });
+    on('#export-format', 'change', 'exportFormat', str);
+    on('#voxel-mm', 'change', 'voxelMM', (el) => Math.max(0.01, Number(el.value) || DEFAULTS.voxelMM));
     $('#btn-download').addEventListener('click', exportGrid);
 
     // Generate (AI).
-    $('#ai-provider').addEventListener('change', (e) => { settings.aiProvider = e.target.value; saveSettings(); syncControls(); });
+    onPress($('#ai-provider'), (v) => change('aiProvider', v));
     for (const [id, key] of [['#ai-url', 'aiUrl'], ['#ai-key', 'aiKey']])
         $(id).addEventListener('change', (e) => { settings[key] = e.target.value.trim(); saveSettings(); checkServer(); });
     $('#input-ai').addEventListener('change', (e) => {
@@ -446,27 +448,25 @@ function wireDom() {
         if (!file) return;
         state.aiPhoto = file;
         $('#drop-name-ai').textContent = file.name;
-        $('#drop-zone-ai').classList.add('loaded');
     });
     $('#btn-generate').addEventListener('click', generate);
 
     // Edit tools; swatches pick their colour.
     $('#palette-swatches').addEventListener('click', (e) => {
-        const index = Number(e.target.dataset.index);
-        if (index) selectColor(index);
+        const b = e.target.closest('button[data-index]');
+        if (b) selectColor(Number(b.dataset.index));
     });
-    for (const r of document.querySelectorAll('input[name="tool"]'))
-        r.addEventListener('change', () => setTool(r.value));
-    for (const r of document.querySelectorAll('input[name="box-op"]'))
-        r.addEventListener('change', () => { settings.boxOp = r.value; saveSettings(); });
-    $('#brush').addEventListener('input', (e) => { settings.brush = Number(e.target.value); saveSettings(); syncControls(); });
-    for (const [id, key] of [['#mirror-x', 'mirrorX'], ['#mirror-z', 'mirrorZ']])
-        $(id).addEventListener('change', (e) => { settings[key] = e.target.checked; saveSettings(); });
+    onPress($('#tools'), setTool);
+    onPress($('#box-op'), (v) => change('boxOp', v));
+    on('#brush', 'input', 'brush', num);
+    on('#mirror-x', 'change', 'mirrorX', checked);
+    on('#mirror-z', 'change', 'mirrorZ', checked);
     $('#btn-undo').addEventListener('click', () => undoRedo('undo'));
     $('#btn-redo').addEventListener('click', () => undoRedo('redo'));
     wireEditing();
     window.addEventListener('keydown', onKey);
     setTool('orbit');
+    for (const b of $('#tools').querySelectorAll('button')) b.disabled = true;   // until there are voxels
 
     syncControls();
 }
@@ -488,15 +488,17 @@ function setTool(tool) {
     state.boxStart = null;
     showBox(null);
     setToolMode(tool !== 'orbit');
-    for (const r of document.querySelectorAll('input[name="tool"]')) r.checked = r.value === tool;
+    press($('#tools'), tool);
     $('#field-brush').hidden = !['paint', 'erase', 'add'].includes(tool);
     $('#field-box-op').hidden = tool !== 'box';
+    $('#hint').textContent = tool === 'orbit' ? 'Drag to orbit · scroll to zoom'
+        : tool === 'box' ? 'Click two corners · right-drag to orbit' : 'Left-drag to edit · right-drag to orbit';
 }
 
 function selectColor(index) {
     if (!index) return;
     state.paintIndex = index;
-    for (const s of $('#palette-swatches').children) s.classList.toggle('active', Number(s.dataset.index) === index);
+    for (const s of $('#palette-swatches').children) s.setAttribute('aria-pressed', String(Number(s.dataset.index) === index));
 }
 
 function updateUndoButtons() {
@@ -578,34 +580,37 @@ function wireEditing() {
 }
 
 function onKey(e) {
-    if (e.target.closest?.('input, textarea, select')) return;
+    // Letters belong to text fields and selects; switches and sliders keep the shortcuts.
+    if (e.target.closest?.('textarea, select, dialog, input:not([type="checkbox"], [type="range"])')) return;
     const key = e.key.toLowerCase(), mod = e.metaKey || e.ctrlKey;
     if (mod && (key === 'z' || key === 'y')) {
         e.preventDefault();
         return undoRedo(key === 'y' || e.shiftKey ? 'redo' : 'undo');
     }
     if (mod || e.altKey) return;
-    if (key === 'escape') {
+    if (e.key === '?') $('#shortcuts').showModal();
+    else if (key === 'escape') {
         state.boxStart = null;
         showBox(null);
-    } else if (TOOL_KEYS[key] && state.grid) setTool(TOOL_KEYS[key]);
+    } else if (key === 'r') resetView();
+    else if (TOOL_KEYS[key] && state.grid) setTool(TOOL_KEYS[key]);
 }
 
 // ── Generate (AI) ─────────────────────────────────────────────────────────────
 
-// Not run on page load: from the Pages site, reaching a local server makes
+// Not run on page load: from the live site, reaching a local server makes
 // Chrome ask for local-network permission.
 async function checkServer() {
     const el = $('#ai-health');
-    el.className = 'ai-health';
+    el.className = 'help';
     el.textContent = 'Checking…';
     try {
         const h = await serverHealth({ url: settings.aiUrl, key: settings.aiKey, signal: AbortSignal.timeout(4000) });
-        el.className = 'ai-health ok';
+        el.className = 'help ok';
         el.textContent = `Connected · ${h.device}`;
         return true;
     } catch (err) {
-        el.className = 'ai-health error';
+        el.className = 'help error';
         el.textContent = err.message.startsWith('Model server') ? err.message : `Can't reach ${settings.aiUrl}`;
         return false;
     }
@@ -615,13 +620,15 @@ async function generate() {
     const photo = state.aiPhoto, prompt = $('#ai-prompt').value.trim();
     if (settings.aiProvider === 'browser') {
         if (!photo) return setStatus('Choose a photo to turn into a relief.', 'error');
+        if (keepEdits()) return;
         settings.imageMode = 'photo';
         saveSettings();
-        showSourceName(photo.name);
-        setSource({ kind: 'image', name: photo.name.replace(/\.[^.]+$/, ''), bitmap: await createImageBitmap(photo) });
+        showSource(photo.name, fmtBytes(photo.size), 'image');
+        setSource({ kind: 'image', name: baseName(photo.name), bitmap: await createImageBitmap(photo) });
         return;
     }
     if (!photo && !prompt) return setStatus('Type a prompt or choose a photo.', 'error');
+    if (keepEdits()) return;
     if (!(await checkServer())) return setStatus(`Model server not reachable at ${settings.aiUrl}.`, 'error');
 
     state.abort?.abort();
@@ -636,11 +643,11 @@ async function generate() {
             url: settings.aiUrl, key: settings.aiKey, image: photo, prompt, signal: abort.signal,
             onStage: (stage) => stage !== 'done' && setStatus(`Model server: ${stage}…`, 'info'),
         });
-        const name = (prompt || photo.name.replace(/\.[^.]+$/, '')).slice(0, 40).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '') || 'generated';
+        const name = (prompt || baseName(photo.name)).slice(0, 40).replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '') || 'generated';
         const pivot = new THREE.Group();
         pivot.add(await loadModel([new File([glb], `${name}.glb`)]));
         textureCache.clear();
-        showSourceName(`${name}.glb · generated`);
+        showSource(`${name}.glb`, 'generated');
         setSource({ kind: 'model', name, pivot });
     } catch (err) {
         const cancelled = err.name === 'AbortError' || err.message === 'Cancelled.';
@@ -673,8 +680,7 @@ async function exportGrid() {
         const bytes = await EXPORTERS[format].run(state.grid, { voxelMM: settings.voxelMM, name: state.source.name });
         download(bytes, name, EXPORTERS[format].mime);
         state.edited = false;
-        const size = bytes.length ?? bytes.byteLength;
-        setStatus(`Exported ${name} (${size >= 1048576 ? `${(size / 1048576).toFixed(1)} MB` : `${(size / 1024).toFixed(1)} KB`})`, 'ok');
+        setStatus(`Exported ${name} (${fmtBytes(bytes.length ?? bytes.byteLength)})`, 'ok');
     } catch (err) {
         setStatus(`Export failed: ${err.message}`, 'error');
         console.error('[main] export error:', err);
@@ -683,7 +689,6 @@ async function exportGrid() {
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', () => {
-    initPreview(document.getElementById('canvas-container'));
-    wireDom();
-});
+initPreview($('#viewport'));
+wireDom();
+openSample();

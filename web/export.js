@@ -15,7 +15,7 @@ import { meshGrid } from './mesher.js';
 export function toOBJ(grid, { voxelMM = 10 } = {}) {
     const s = voxelMM / 1000, ox = grid.sx / 2, oz = grid.sz / 2;
     const f = (v) => +v.toFixed(5);
-    const lines = ['# VOXY voxel mesh', 'o voxels'];
+    const lines = ['# Instant-Voxel voxel mesh', 'o voxels'];
     const faces = [];
     let base = 1;
     for (const c of meshGrid(grid).values()) {
