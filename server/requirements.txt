@@ -1,0 +1,15 @@
+# API
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9
+pillow>=10.0
+
+# Models (skip these to run with VOXY_FAKE_MODELS=1)
+torch>=2.4
+diffusers>=0.30
+transformers>=4.44
+accelerate>=0.33
+safetensors>=0.4
+huggingface_hub>=0.24
+rembg>=2.0.57
+# Stable Fast 3D itself comes from its repo (see README.md).
