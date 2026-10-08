@@ -1,0 +1,124 @@
+/* Instant-Voxel tokens
+   A white, airy workbench for turning models and images into voxels. Moss greens
+   (the colour of a grass block) carry action and selection; tone, not lines, separates things.
+   Contrast ratios are measured against --bg.
+   Copied from the Instant-Voxel design system (OpenDesign); index.html loads the fonts. */
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces: tonal steps, no borders */
+  --bg: #FFFFFF;                  /* surface_container_lowest: panels */
+  --surface: #FFFFFF;
+  --surface-dim: #F9F9F9;         /* page behind the panels */
+  --surface-low: #F3F3F4;         /* viewport, wells, inputs */
+  --surface-warm: #EEEEEE;        /* nested tiles on a low surface */
+  --surface-high: #E8E8E8;        /* secondary buttons */
+  --surface-highest: #E2E2E2;
+  --surface-hover: #F3F3F4;
+  --surface-active: #E8E8E8;
+  --glass: rgba(255, 255, 255, 0.8);   /* floating header and toolbar, with 20px blur */
+
+  /* Text: never #000 */
+  --fg: #1A1C1C;                  /* 17.3:1 */
+  --fg-2: #434840;                /* 9.4:1 */
+  --muted: #5C6259;               /* 6.3:1; 5.7:1 on the low surface (was outline #73796F, 4.0:1) */
+  --meta: #C3C8BD;                /* outline-variant: non-text only */
+  --fg-inverted: #FFFFFF;
+
+  /* Moss */
+  --accent: #476643;              /* the one decisive action (Convert); white on it 6.5:1 */
+  --accent-on: #FFFFFF;
+  --accent-hover: #3D593A;
+  --accent-subtle: #A5C89E;       /* primary_container: selected tool, active toggle */
+  --accent-subtle-on: #365433;    /* 4.6:1 */
+  --accent-border: rgba(71, 102, 67, 0.20);
+  --lichen: #DEE9A3;              /* secondary_container: active chips */
+  --lichen-on: #4E5626;           /* 6.1:1 (was #606931, 4.6:1) */
+
+  /* Lines exist only as a ghost when accessibility needs an edge */
+  --border: rgba(195, 200, 189, 0.45);
+  --border-soft: rgba(195, 200, 189, 0.15);
+  --border-strong: #C3C8BD;
+  --focus: #476643;
+  --ring-focus: 0 0 0 3px rgba(71, 102, 67, 0.28);
+
+  /* Status */
+  --success: #476643;
+  --success-subtle: rgba(165, 200, 158, 0.35);
+  --warn: #7A5A00;                /* 6.6:1 */
+  --warn-subtle: rgba(222, 233, 163, 0.6);
+  --danger: #BA1A1A;              /* 6.5:1 (was #D9534F, 3.9:1) */
+  --danger-subtle: rgba(186, 26, 26, 0.08);
+  --info: var(--fg-2);
+  --info-subtle: var(--surface-low);
+
+  /* Voxel sample palette (the viewport's demo model only) */
+  --vx-grass: #6FA85A;
+  --vx-grass-2: #8CC06F;
+  --vx-dirt: #8A6446;
+  --vx-bark: #6E4B32;
+  --vx-leaf: #4E8A47;
+  --vx-leaf-2: #79B062;
+  --vx-flower: #E9C46A;
+
+  /* Type */
+  --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-display: var(--font-sans);
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;   /* counts, sizes, file names */
+  --font-icon: "Material Symbols Outlined";
+
+  --text-2xs: 11px;               /* card labels, all caps, Latin only */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-lg: 17px;
+  --text-xl: 20px;
+  --text-2xl: 28px;               /* headline-md */
+  --text-3xl: 40px;
+  --text-4xl: 56px;               /* display-lg */
+
+  --leading-body: 1.6;
+  --leading-tight: 1.1;
+  --tracking-label: 0.06em;
+  --h1-tracking: -0.02em;
+  --h2-tracking: -0.02em;
+
+  /* Space (the spec's scale, in px) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Shape: one real scale (the CSS used 2rem and an undefined --radius-md) */
+  --radius-sm: 12px;              /* swatches, small tiles */
+  --radius-md: 16px;              /* nested tiles, tool grid, inputs */
+  --radius-lg: 28px;              /* panel cards */
+  --radius-xl: 36px;              /* the viewport frame */
+  --radius-pill: 9999px;          /* buttons, chips, segmented controls */
+  --radius-control: var(--radius-pill);
+  --radius-card: var(--radius-lg);
+  --radius-badge: var(--radius-pill);
+  --control-h: 40px;
+  --btn-weight: 600;
+
+  /* Depth: atmospheric, moss-tinted, only for things that float */
+  --elev-flat: none;
+  --elev-raised: 0 8px 24px rgba(71, 102, 67, 0.06);
+  --elev-modal: 0 20px 40px rgba(71, 102, 67, 0.10);
+
+  /* Motion */
+  --motion-fast: 120ms;
+  --motion-base: 220ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --motion-fast: 0ms; --motion-base: 0ms; }
+}

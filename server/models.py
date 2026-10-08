@@ -1,10 +1,10 @@
-"""VOXY model server: photo or prompt → 3D mesh (GLB bytes).
+"""Instant-Voxel model server: photo or prompt → 3D mesh (GLB bytes).
 
 image → mesh: Stable Fast 3D (stabilityai/stable-fast-3d, Stability AI
               Community License: free under $1M annual revenue, attribution).
 text → image: SDXL + SDXL-Lightning 4-step UNet (CreativeML Open RAIL++-M),
               then image → mesh.
-Models load on first use and stay in memory. Set VOXY_FAKE_MODELS=1 to serve
+Models load on first use and stay in memory. Set FAKE_MODELS=1 to serve
 a placeholder cube instead (for testing the API without the models).
 """
 
@@ -79,5 +79,5 @@ def text_to_image(prompt, seed=None, stage=lambda s: None):
     return _t2i(prompt + PROMPT_SUFFIX, num_inference_steps=4, guidance_scale=0, generator=generator).images[0]
 
 
-if os.environ.get("VOXY_FAKE_MODELS") == "1":
+if os.environ.get("FAKE_MODELS") == "1":
     from fake_models import image_to_glb, text_to_image, device  # noqa: F401,F811

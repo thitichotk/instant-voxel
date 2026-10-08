@@ -35,7 +35,7 @@ async function pipe(task, model, options, onProgress) {
             files.set(e.file, [e.loaded, e.total]);
             let loaded = 0, total = 0;
             for (const [l, t] of files.values()) { loaded += l; total += t; }
-            onProgress?.(loaded / total, `Downloading ${model.split('/')[1]}… ${Math.round(loaded / 1e6)} / ${Math.round(total / 1e6)} MB`);
+            onProgress?.(loaded / total, `Downloading ${model.split('/')[1]}… ${(loaded / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`);
         };
         pipes.set(key, tf.pipeline(task, model, { ...options, progress_callback }).catch((err) => {
             pipes.delete(key);

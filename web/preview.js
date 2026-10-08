@@ -4,7 +4,9 @@
  * Draws a Grid (see grid.js) as chunked greedy meshes from mesher.js, in grid
  * units: the model group is centred on X/Z with its bottom at Y = 0. Picks
  * voxels from ray hits, and can overlay the source model as a translucent
- * "ghost" to check the voxels line up with it.
+ * "ghost" to check the voxels line up with it. Interface colours come from the
+ * design tokens (tokens.css); lighting is hemisphere + sun with no tone mapping,
+ * so top faces show the palette colours that get exported.
  */
 
 import * as THREE from 'three';
@@ -14,11 +16,13 @@ import { meshChunk, linearPalette } from './mesher.js';
 let renderer, scene, camera, controls, sun, helpers;
 let grid = null;
 let ghost = null;
+let toolActive = false;
 const model = new THREE.Group();   // grid space; chunk meshes and the ghost live here
 const chunks = new Map();          // chunk key → THREE.Mesh
 const raycaster = new THREE.Raycaster();
 const clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
-const view = { lines: false, ghost: false, clip: 1 };
+const view = { lines: false, ghost: false, clip: 1, grid: true, spin: false };
+const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
 function createEdgeTexture() {
     const size = 64;
@@ -31,7 +35,7 @@ function createEdgeTexture() {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, size, size);
     ctx.lineWidth = 4;
-    ctx.strokeStyle = '#222222';
+    ctx.strokeStyle = token('--fg');
     ctx.strokeRect(0, 0, size, size);
 
     const texture = new THREE.CanvasTexture(canvas);
@@ -42,12 +46,10 @@ function createEdgeTexture() {
     return texture;
 }
 
-const edgeTexture = createEdgeTexture();
 const voxelMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 });
 // X-ray overlay: drawn on top of the voxels so the source outline stays visible.
-const ghostMaterial = new THREE.MeshBasicMaterial({
-    color: 0x2f6fd0, transparent: true, opacity: 0.18, depthTest: false, depthWrite: false,
-});
+const ghostMaterial = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.22, depthTest: false, depthWrite: false });
+let edgeTexture;
 
 // ── Helper: Create text sprite ──────────────────────────────────────────────
 function createTextSprite(text) {
@@ -56,20 +58,14 @@ function createTextSprite(text) {
     canvas.height = 64;
     const ctx = canvas.getContext('2d');
 
-    // Minimal text styling, matching the subtle grid helpers
+    // Muted text with a halo in the viewport colour, so it reads over the grid lines.
     ctx.font = '600 28px "Plus Jakarta Sans", sans-serif';
-    ctx.fillStyle = '#8a9186'; // Similar to grid lines but slightly more legible
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-
-    // Optional: add a pure white slight glow/stroke behind text for readability against lines
-    ctx.shadowColor = '#f9f9f9';
-    ctx.shadowBlur = 4;
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = '#f9f9f9';
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = token('--surface-low');
     ctx.strokeText(text, canvas.width / 2, canvas.height / 2 + 2);
-
-    ctx.shadowBlur = 0;
+    ctx.fillStyle = token('--muted');
     ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 2);
 
     const texture = new THREE.CanvasTexture(canvas);
@@ -91,19 +87,20 @@ function createTextSprite(text) {
 // ── Initialise scene (called once) ───────────────────────────────────────────
 
 export function initPreview(container) {
-    // ── renderer
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    // ── renderer (transparent: the viewport's own surface shows through)
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setSize(container.clientWidth, container.clientHeight, false);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    renderer.toneMapping        = THREE.ACESFilmicToneMapping;
-    container.appendChild(renderer.domElement);
+    container.prepend(renderer.domElement);
 
     // ── scene
     scene = new THREE.Scene();
-    scene.background = new THREE.Color('#f5f5f7');
     scene.add(model);
+    edgeTexture = createEdgeTexture();
+    ghostMaterial.color.set(token('--accent'));
+    boxLines.material.color.set(token('--accent'));
 
     // ── camera
     camera = new THREE.PerspectiveCamera(
@@ -114,28 +111,26 @@ export function initPreview(container) {
     );
     camera.position.set(80, 60, 80);
 
-    // ── lighting
-    // Soft Hemisphere ambient + tuned Directional light for crisp, Goxel-style shadows
-    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x888888, 0.4);
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+    // ── lighting: hemisphere + one sun, as in the design system's viewport
+    const hemiLight = new THREE.HemisphereLight(0xffffff, token('--surface-highest'), 1.7);
 
-    sun = new THREE.DirectionalLight(0xffffff, 1.0);
+    sun = new THREE.DirectionalLight(0xffffff, 1.6);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
     sun.shadow.bias = -0.001; // Prevent shadow acne on voxel surfaces
     fitLight(1);
 
-    scene.add(hemiLight, ambientLight, sun);
+    scene.add(hemiLight, sun);
 
     // ── orbit controls
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
+    controls.autoRotateSpeed = 0.6;
 
     // ── floor helpers (scaled with the model in frame())
     helpers = new THREE.Group();
-    helpers.add(new THREE.GridHelper(200, 40, 0xbbbbbb, 0xd8d8d8));
-    helpers.add(new THREE.AxesHelper(100)); // Shows Origin
+    helpers.add(new THREE.GridHelper(200, 40, token('--meta'), token('--surface-highest')));
     for (const [text, x, z] of [['X', 110, 0], ['Z', 0, 110], ['-X', -110, 0], ['-Z', 0, -110]]) {
         const label = createTextSprite(text);
         label.position.set(x, 0, z);
@@ -154,7 +149,7 @@ export function initPreview(container) {
     // ── resize observer
     const ro = new ResizeObserver(() => {
         const w = container.clientWidth, h = container.clientHeight;
-        renderer.setSize(w, h);
+        renderer.setSize(w, h, false);
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
     });
@@ -173,6 +168,11 @@ function fitLight(s) {
     const cam = sun.shadow.camera, d = 120 * s;
     Object.assign(cam, { left: -d, right: d, top: d, bottom: -d, near: 1, far: 400 * s });
     cam.updateProjectionMatrix();
+}
+
+/** Frame the current grid: camera back to its starting angle and distance. */
+export function resetView() {
+    if (grid) frame();
 }
 
 function frame() {
@@ -248,7 +248,7 @@ export function setGhost(object, origin, cell) {
     applyView();
 }
 
-/** { lines, ghost, clip } — clip is the visible fraction of the model height (1 = no clipping). */
+/** { lines, ghost, clip, grid, spin }: clip is the visible fraction of the model height (1 = no clipping). */
 export function setView(opts) {
     Object.assign(view, opts);
     applyView();
@@ -258,6 +258,8 @@ function applyView() {
     voxelMaterial.map = view.lines ? edgeTexture : null;
     voxelMaterial.needsUpdate = true;
     if (ghost) ghost.visible = view.ghost;
+    helpers.visible = view.grid;
+    controls.autoRotate = view.spin && !toolActive;   // the turntable pauses while editing
     clipPlane.constant = grid ? view.clip * grid.sy : 0;
     renderer.clippingPlanes = grid && view.clip < 1 ? [clipPlane] : [];
 }
@@ -282,6 +284,8 @@ export const canvas = () => renderer.domElement;
 
 /** While an edit tool is active, left-drag edits and right-drag orbits (instead of panning). */
 export function setToolMode(active) {
+    toolActive = active;
+    controls.autoRotate = view.spin && !active;
     controls.mouseButtons.LEFT = active ? null : THREE.MOUSE.ROTATE;
     controls.mouseButtons.RIGHT = active ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
     renderer.domElement.style.cursor = active ? 'crosshair' : '';
@@ -289,7 +293,7 @@ export function setToolMode(active) {
 
 const boxLines = new THREE.LineSegments(
     new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
-    new THREE.LineBasicMaterial({ color: 0x476643, depthTest: false }),
+    new THREE.LineBasicMaterial({ depthTest: false }),
 );
 boxLines.renderOrder = 998;
 

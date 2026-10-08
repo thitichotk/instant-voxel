@@ -1,10 +1,11 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>VOXY — 3D to voxels</title>
-  <meta name="description" content="Turn 3D models into voxel art: MagicaVoxel .vox, meshes and more, right in the browser." />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Instant-Voxel · Models and images to voxels</title>
+  <meta name="description" content="Turn 3D models and images into voxel art in the browser, edit it, and export it for MagicaVoxel, Minecraft, game engines or 3D printing." />
+  <link rel="icon" href="assets/logo-mark.svg" type="image/svg+xml" />
 
   <script type="importmap">
   {
@@ -15,381 +16,239 @@
   }
   </script>
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
-  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css">
-
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" />
+  <!-- Only the icons this page uses (icon_names must stay in alphabetical order). -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..24,400,0..1,0&icon_names=3d_rotation,add_box,auto_awesome,brush,center_focus_strong,close,colorize,deployed_code,download,expand_more,format_color_fill,help,image,ink_eraser,palette,photo_camera,redo,rotate_90_degrees_cw,select,sync,undo,upload_file,view_in_ar&display=block" />
+  <link rel="stylesheet" href="tokens.css" />
+  <link rel="stylesheet" href="components.css" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-
-<!-- ══════════════════════ THREE.JS CANVAS ══════════════════════════ -->
-<div id="canvas-container">
-  <!-- Viewport header badges -->
-  <div id="viewport-overlay">
-    <div class="viewport-badge">
-      <span class="viewport-dot"></span>
-      Live Render
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <h1><img src="assets/logo.svg" alt="Instant-Voxel" width="189" height="30" /></h1>
+      <p>Models and images to voxels</p>
     </div>
-  </div>
+    <div class="acts">
+      <button class="icon-btn" id="btn-undo" aria-label="Undo" title="Undo (⌘Z)" disabled><span class="ms">undo</span></button>
+      <button class="icon-btn" id="btn-redo" aria-label="Redo" title="Redo (⇧⌘Z)" disabled><span class="ms">redo</span></button>
+      <button class="icon-btn" id="btn-help" aria-label="Keyboard shortcuts" title="Shortcuts (?)"><span class="ms">help</span></button>
+    </div>
+  </header>
 
-  <!-- Hint overlay shown before a model is loaded -->
-  <div id="hint-overlay">
-    <div class="hint-glyph">⬡</div>
-    <div class="hint-title">Load a 3D model</div>
-    <div class="hint-sub">Drop files anywhere, or pick them in the Source panel</div>
-  </div>
-
-  <!-- Viewport Rotation Gizmos -->
-  <div id="viewport-gizmos">
-    <button class="gizmo-btn" id="btn-rotate-x" title="Rotate X 90°">
-      <span class="material-symbols-outlined">rotate_90_degrees_cw</span>
-    </button>
-    <button class="gizmo-btn" id="btn-rotate-y" title="Rotate Y 90°">
-      <span class="material-symbols-outlined">rotate_right</span>
-    </button>
-  </div>
-</div>
-
-<!-- Shown while files are dragged over the window -->
-<div id="drop-overlay"><div class="drop-overlay-card">Drop to open</div></div>
-
-<!-- ══════════════════════ EDITOR UI OVERLAYS ═══════════════════ -->
-<div id="editor-ui">
-
-  <!-- Left Sidebar: Inputs -->
-  <aside class="editor-panel" id="panel-left">
-    <header class="panel-header">
-      <div class="panel-eyebrow">Voxel Studio</div>
-      <div class="panel-title">VOXY<span>.</span></div>
-      <div class="panel-subtitle">Models &amp; images → voxels</div>
-    </header>
-
-    <!-- Source -->
-    <div class="card">
-      <div class="card-label">Source</div>
-      <div class="drop-zone" id="drop-zone-model" title="Click or drop model files">
-        <input type="file" id="input-model" multiple
-               accept=".glb,.gltf,.bin,.obj,.mtl,.fbx,.stl,.ply,.3mf,.dae,.vox,.png,.jpg,.jpeg,.webp,.gif,.bmp"
-               aria-label="Choose model files" />
-        <div class="drop-icon-wrap">
-          <span class="material-symbols-outlined">upload_file</span>
-        </div>
-        <div class="drop-info">
-          <div class="drop-name" id="drop-name-model">Choose model files</div>
-          <div class="drop-hint">GLB · glTF · OBJ · FBX · STL · PLY · 3MF · DAE · VOX · PNG · JPG</div>
-        </div>
+  <aside class="panel" aria-label="Input">
+    <section class="pcard">
+      <h2 class="pcard-label">Source</h2>
+      <div class="file" id="source-file" hidden>
+        <span class="ms" id="source-icon">view_in_ar</span><span class="grow" id="source-name"></span><span class="mono" id="source-meta"></span>
       </div>
-    </div>
+      <label class="drop">
+        <input type="file" class="visually-hidden" id="input-model" multiple
+               accept=".glb,.gltf,.bin,.obj,.mtl,.fbx,.stl,.ply,.3mf,.dae,.vox,.hex,.png,.jpg,.jpeg,.webp,.gif,.bmp" />
+        <span class="ms">upload_file</span>
+        <b>Drop a model or image</b>
+        <span class="mono">.glb .gltf .obj .fbx .stl .ply .3mf .dae .vox .png .jpg</span>
+      </label>
+    </section>
 
-    <!-- Generate (AI) -->
-    <div class="card">
-      <div class="card-label">Generate</div>
+    <section class="pcard">
+      <h2 class="pcard-label">Generate</h2>
+      <div class="seg" role="group" aria-label="Generate with" id="ai-provider">
+        <button type="button" data-v="browser">In browser</button>
+        <button type="button" data-v="server">Model server</button>
+      </div>
+      <div class="stack" id="ai-server-fields">
+        <div class="field"><label for="ai-url">Server</label><input class="input mono" type="url" id="ai-url" spellcheck="false" /></div>
+        <div class="field"><label for="ai-key">API key</label><input class="input" type="password" id="ai-key" placeholder="Optional" autocomplete="off" /></div>
+        <p class="help" id="ai-health" role="status">Not checked</p>
+        <div class="field"><label for="ai-prompt">Prompt</label><textarea class="input" id="ai-prompt" rows="2" maxlength="500" placeholder="One object, e.g. a red toy robot"></textarea></div>
+      </div>
+      <label class="drop">
+        <input type="file" class="visually-hidden" id="input-ai" accept="image/png,image/jpeg,image/webp" />
+        <span class="ms">photo_camera</span>
+        <b id="drop-name-ai">Choose a photo</b>
+        <span class="help" id="drop-hint-ai"></span>
+      </label>
+      <button class="btn btn-soft btn-wide" id="btn-generate"><span class="ms">auto_awesome</span>Generate</button>
+      <p class="help" id="ai-note">3D by Stable Fast 3D. Powered by Stability AI.</p>
+    </section>
+
+    <section class="pcard">
+      <h2 class="pcard-label">Voxelise</h2>
       <div class="field">
-        <label for="ai-provider">With</label>
-        <select id="ai-provider">
-          <option value="server">Model server · 3D</option>
-          <option value="browser">In-browser · relief</option>
-        </select>
+        <div class="row"><label for="size">Size</label><span class="val" id="size-value"></span></div>
+        <input class="range" type="range" id="size" min="8" max="512" step="1" />
       </div>
-      <div id="ai-server-fields">
+      <div class="stack" id="model-fields">
         <div class="field">
-          <label for="ai-url">Server</label>
-          <input type="url" id="ai-url" spellcheck="false" />
+          <label for="axis">Size along</label>
+          <div class="select-wrap"><select class="select" id="axis">
+            <option value="-1">Longest side</option>
+            <option value="0">Width (X)</option>
+            <option value="1">Height (Y)</option>
+            <option value="2">Depth (Z)</option>
+          </select></div>
         </div>
         <div class="field">
-          <label for="ai-key">API key</label>
-          <input type="password" id="ai-key" placeholder="optional" autocomplete="off" />
+          <span class="label" id="fill-label">Fill</span>
+          <div class="seg" role="group" aria-labelledby="fill-label" id="fill">
+            <button type="button" data-v="surface">Surface</button>
+            <button type="button" data-v="solid">Solid</button>
+          </div>
         </div>
-        <div class="ai-health" id="ai-health">Not checked</div>
-        <textarea id="ai-prompt" rows="2" maxlength="500" placeholder="Describe one object, e.g. a red toy robot"></textarea>
+        <div class="field" id="field-hollow"><label for="hollow">Hollow shell (voxels, 0 is off)</label><input class="input mono" type="number" id="hollow" min="0" max="64" step="1" /></div>
+        <div class="field"><label for="islands">Drop islands under (voxels)</label><input class="input mono" type="number" id="islands" min="0" max="1000000" step="1" /></div>
       </div>
-      <div class="drop-zone" id="drop-zone-ai" title="Click to choose a photo">
-        <input type="file" id="input-ai" accept="image/png,image/jpeg,image/webp" aria-label="Choose a photo" />
-        <div class="drop-icon-wrap">
-          <span class="material-symbols-outlined">photo_camera</span>
-        </div>
-        <div class="drop-info">
-          <div class="drop-name" id="drop-name-ai">Choose a photo</div>
-          <div class="drop-hint" id="drop-hint-ai">Optional with a prompt</div>
-        </div>
-      </div>
-      <div class="actions">
-        <button class="btn btn-primary" id="btn-generate">
-          <span class="material-symbols-outlined" style="font-size:18px;">auto_awesome</span>
-          Generate
-        </button>
-      </div>
-      <div class="ai-note" id="ai-note">3D by Stable Fast 3D · Powered by Stability AI</div>
-    </div>
-
-    <!-- Voxelise -->
-    <div class="card">
-      <div class="card-label">Voxelise</div>
-      <div class="slider-header">
-        <span class="slider-desc">Size (voxels)</span>
-        <span class="slider-badge" id="size-value">64</span>
-      </div>
-      <div class="slider-wrap">
-        <input type="range" id="size" min="8" max="512" step="1" value="64" aria-label="Size in voxels" />
-      </div>
-      <div id="model-fields">
-      <div class="field">
-        <label for="axis">Size along</label>
-        <select id="axis">
-          <option value="-1">Longest axis</option>
-          <option value="0">X (width)</option>
-          <option value="1">Y (height)</option>
-          <option value="2">Z (depth)</option>
-        </select>
-      </div>
-      <div class="field">
-        <span>Fill</span>
-        <div class="segmented" role="radiogroup" aria-label="Fill">
-          <label><input type="radio" name="fill" value="surface">Surface</label>
-          <label><input type="radio" name="fill" value="solid">Solid</label>
-        </div>
-      </div>
-      <div class="field" id="field-hollow">
-        <label for="hollow">Hollow shell (0 = off)</label>
-        <input type="number" id="hollow" min="0" max="64" step="1" />
-      </div>
-      <div class="field">
-        <label for="islands">Drop islands under</label>
-        <input type="number" id="islands" min="0" max="1000000" step="1" title="Voxels; 0 keeps everything" />
-      </div>
-      </div>
-      <div id="image-fields" hidden>
+      <div class="stack" id="image-fields" hidden>
         <div class="field">
           <label for="image-mode">Image as</label>
-          <select id="image-mode">
+          <div class="select-wrap"><select class="select" id="image-mode">
             <option value="pixel">Pixel art</option>
             <option value="height">Heightmap</option>
             <option value="photo">Photo relief (AI)</option>
-          </select>
+          </select></div>
         </div>
-        <div class="field">
-          <label for="depth">Depth (voxels)</label>
-          <input type="number" id="depth" min="1" max="256" step="1" />
-        </div>
+        <div class="field"><label for="depth">Depth (voxels)</label><input class="input mono" type="number" id="depth" min="1" max="256" step="1" /></div>
         <div class="field" id="field-background">
           <label for="background">Background</label>
-          <select id="background">
+          <div class="select-wrap"><select class="select" id="background">
             <option value="depth">Cut by depth</option>
             <option value="keep">Keep</option>
             <option value="mask">AI mask (115 MB)</option>
-          </select>
+          </select></div>
         </div>
-        <label class="toggle-paint" id="field-mirror">
-          <input type="checkbox" id="mirror" aria-label="Mirror the relief to the back">
-          <span class="material-symbols-outlined" style="font-size: 16px;">flip</span>
-          Mirror back
-        </label>
+        <label class="switch" id="field-mirror">Mirror to the back<input type="checkbox" id="mirror" /></label>
       </div>
-    </div>
+    </section>
 
-    <!-- Colour -->
-    <div class="card">
-      <div class="card-label">Colour</div>
-      <div class="field">
-        <label for="palette-mode">Palette</label>
-        <select id="palette-mode">
-          <option value="auto">Auto (from model)</option>
-          <option value="cube">Default cube</option>
-          <option value="minecraft">Minecraft blocks</option>
-          <option value="hex">Custom .hex</option>
-        </select>
+    <section class="pcard">
+      <h2 class="pcard-label">Colour</h2>
+      <div class="chips" role="group" aria-label="Palette" id="palette-mode">
+        <button type="button" class="chip" data-v="auto">From the model</button>
+        <button type="button" class="chip" data-v="cube">Default cube</button>
+        <button type="button" class="chip" data-v="minecraft">Minecraft blocks</button>
+        <button type="button" class="chip" data-v="hex">Custom .hex</button>
       </div>
-      <div id="field-colors">
-        <div class="slider-header">
-          <span class="slider-desc">Colours</span>
-          <span class="slider-badge" id="colors-value">255</span>
-        </div>
-        <div class="slider-wrap">
-          <input type="range" id="colors" min="2" max="255" step="1" value="255" aria-label="Number of colours" />
-        </div>
+      <div class="field" id="field-colors">
+        <div class="row"><label for="colors">Colours</label><span class="val" id="colors-value"></span></div>
+        <input class="range" type="range" id="colors" min="2" max="255" step="1" />
       </div>
-      <div class="drop-zone" id="drop-zone-pal" title="Click or drop a .hex file">
-        <input type="file" id="input-pal" accept=".hex" aria-label="Choose HEX palette file" />
-        <div class="drop-icon-wrap">
-          <span class="material-symbols-outlined">palette</span>
-        </div>
-        <div class="drop-info">
-          <div class="drop-name" id="drop-name-pal">Choose .hex file</div>
-          <div class="drop-hint">One colour per line</div>
-        </div>
-      </div>
-      <label class="toggle-paint">
-        <input type="checkbox" id="dither" aria-label="Dither">
-        <span class="material-symbols-outlined" style="font-size: 16px;">blur_on</span>
-        Dither
+      <label class="drop" id="drop-pal" hidden>
+        <input type="file" class="visually-hidden" id="input-pal" accept=".hex" />
+        <span class="ms">palette</span>
+        <b id="drop-name-pal">Choose a .hex file</b>
+        <span class="help">One colour per line</span>
       </label>
-      <div id="palette-swatches" aria-label="Palette"></div>
-    </div>
+      <label class="switch" id="field-dither">Dither<input type="checkbox" id="dither" /></label>
+      <div class="pcard-row"><span class="label" id="swatches-label">Paint colour</span><span class="mono help" id="stat-colors"></span></div>
+      <div class="swatches" role="group" aria-labelledby="swatches-label" id="palette-swatches"></div>
+    </section>
   </aside>
 
-  <!-- Right Sidebar: Run, View & Export -->
-  <aside class="editor-panel" id="panel-right">
-    <!-- Progress, status & run -->
-    <div class="card">
-      <div class="progress-track"><div id="progress-fill"></div></div>
-      <div class="status-row">
-        <div class="status-dot" id="status-dot"></div>
-        <span id="status-text">Initialising Wasm module…</span>
-      </div>
-      <div class="actions">
-        <button class="btn btn-primary" id="btn-convert" disabled>
-          <span class="material-symbols-outlined" style="font-size:18px;">auto_awesome</span>
-          Voxelise
-        </button>
-        <button class="btn btn-secondary" id="btn-cancel" hidden>
-          <span class="material-symbols-outlined" style="font-size:18px;">close</span>
-          Cancel
-        </button>
-      </div>
+  <main class="view" id="viewport" aria-label="Voxel viewport">
+    <span class="glass status" id="status" role="status"><span class="dot busy" id="status-dot"></span><span id="status-text">Loading…</span></span>
+    <div class="glass gizmos">
+      <button class="icon-btn" id="btn-rotate-x" aria-label="Rotate the model 90° about X" title="Rotate X 90°"><span class="ms">rotate_90_degrees_cw</span></button>
+      <button class="icon-btn" id="btn-rotate-y" aria-label="Rotate the model 90° about Y" title="Rotate Y 90°"><span class="ms">sync</span></button>
+      <button class="icon-btn" id="btn-reset" aria-label="Reset view" title="Reset view (R)"><span class="ms">center_focus_strong</span></button>
     </div>
+    <span class="hint" id="hint">Drag to orbit · scroll to zoom</span>
+  </main>
 
-    <!-- Edit -->
-    <div class="card">
-      <div class="card-label-row">
-        <div class="card-label">Edit</div>
-        <div class="toggle-row">
-          <button class="icon-btn" id="btn-undo" title="Undo (⌘Z)" disabled>
-            <span class="material-symbols-outlined">undo</span>
-          </button>
-          <button class="icon-btn" id="btn-redo" title="Redo (⇧⌘Z)" disabled>
-            <span class="material-symbols-outlined">redo</span>
-          </button>
-        </div>
+  <aside class="panel" aria-label="Output">
+    <section class="pcard">
+      <button class="btn btn-primary btn-wide" id="btn-convert" disabled><span class="ms">deployed_code</span>Convert</button>
+      <button class="btn btn-secondary btn-wide" id="btn-cancel" hidden><span class="ms">close</span>Cancel</button>
+      <div class="progress" aria-hidden="true"><div id="progress-fill"></div></div>
+      <span class="dims mono" id="dims">No voxels yet</span>
+    </section>
+
+    <section class="pcard">
+      <h2 class="pcard-label">Edit</h2>
+      <div class="tools" role="group" aria-label="Tools" id="tools">
+        <button type="button" data-v="orbit" aria-label="Orbit" title="Orbit (O)"><span class="ms">3d_rotation</span></button>
+        <button type="button" data-v="paint" aria-label="Paint" title="Paint (B)"><span class="ms">brush</span></button>
+        <button type="button" data-v="erase" aria-label="Erase" title="Erase (E)"><span class="ms">ink_eraser</span></button>
+        <button type="button" data-v="add" aria-label="Add" title="Add (A)"><span class="ms">add_box</span></button>
+        <button type="button" data-v="fill" aria-label="Fill region" title="Fill region (F)"><span class="ms">format_color_fill</span></button>
+        <button type="button" data-v="pick" aria-label="Pick colour" title="Pick colour (I)"><span class="ms">colorize</span></button>
+        <button type="button" data-v="box" aria-label="Box" title="Box (X)"><span class="ms">select</span></button>
       </div>
-      <div class="tool-grid" role="radiogroup" aria-label="Tool">
-        <label title="Orbit (O)"><input type="radio" name="tool" value="orbit"><span class="material-symbols-outlined">3d_rotation</span></label>
-        <label title="Paint (B)"><input type="radio" name="tool" value="paint"><span class="material-symbols-outlined">brush</span></label>
-        <label title="Erase (E)"><input type="radio" name="tool" value="erase"><span class="material-symbols-outlined">ink_eraser</span></label>
-        <label title="Add (A)"><input type="radio" name="tool" value="add"><span class="material-symbols-outlined">add_box</span></label>
-        <label title="Fill region (F)"><input type="radio" name="tool" value="fill"><span class="material-symbols-outlined">format_color_fill</span></label>
-        <label title="Pick colour (I)"><input type="radio" name="tool" value="pick"><span class="material-symbols-outlined">colorize</span></label>
-        <label title="Box (X)"><input type="radio" name="tool" value="box"><span class="material-symbols-outlined">select</span></label>
-      </div>
-      <div id="field-brush">
-        <div class="slider-header">
-          <span class="slider-desc">Brush size</span>
-          <span class="slider-badge" id="brush-value">1</span>
-        </div>
-        <div class="slider-wrap">
-          <input type="range" id="brush" min="1" max="8" step="1" value="1" aria-label="Brush size" />
-        </div>
+      <div class="field" id="field-brush">
+        <div class="row"><label for="brush">Brush size</label><span class="val" id="brush-value"></span></div>
+        <input class="range" type="range" id="brush" min="1" max="8" step="1" />
       </div>
       <div class="field" id="field-box-op">
-        <span>Box</span>
-        <div class="segmented" role="radiogroup" aria-label="Box action">
-          <label><input type="radio" name="box-op" value="fill">Fill</label>
-          <label><input type="radio" name="box-op" value="paint">Paint</label>
-          <label><input type="radio" name="box-op" value="erase">Erase</label>
+        <span class="label" id="box-label">Box</span>
+        <div class="seg" role="group" aria-labelledby="box-label" id="box-op">
+          <button type="button" data-v="fill">Fill</button>
+          <button type="button" data-v="paint">Paint</button>
+          <button type="button" data-v="erase">Erase</button>
         </div>
       </div>
-      <div class="toggle-row">
-        <label class="toggle-paint">
-          <input type="checkbox" id="mirror-x" aria-label="Mirror edits across X">
-          <span class="material-symbols-outlined" style="font-size: 16px;">flip</span>
-          Mirror X
-        </label>
-        <label class="toggle-paint">
-          <input type="checkbox" id="mirror-z" aria-label="Mirror edits across Z">
-          <span class="material-symbols-outlined" style="font-size: 16px;">flip</span>
-          Mirror Z
-        </label>
-      </div>
-    </div>
+      <label class="switch">Mirror across X<input type="checkbox" id="mirror-x" /></label>
+      <label class="switch">Mirror across Z<input type="checkbox" id="mirror-z" /></label>
+    </section>
 
-    <!-- View -->
-    <div class="card">
-      <div class="card-label">View</div>
-      <div class="toggle-row">
-        <label class="toggle-paint">
-          <input type="checkbox" id="toggle-lines" aria-label="Toggle block lines">
-          <span class="material-symbols-outlined" style="font-size: 16px;">grid_4x4</span>
-          Lines
-        </label>
-        <label class="toggle-paint">
-          <input type="checkbox" id="toggle-ghost" aria-label="Show the source model">
-          <span class="material-symbols-outlined" style="font-size: 16px;">deployed_code</span>
-          Ghost
-        </label>
+    <section class="pcard">
+      <h2 class="pcard-label">View</h2>
+      <label class="switch">Block lines<input type="checkbox" id="toggle-lines" /></label>
+      <label class="switch">Source ghost<input type="checkbox" id="toggle-ghost" /></label>
+      <label class="switch">Ground grid<input type="checkbox" id="toggle-grid" /></label>
+      <label class="switch">Turntable<input type="checkbox" id="toggle-spin" /></label>
+      <div class="field">
+        <div class="row"><label for="clip">Cut height</label><span class="val" id="clip-value">100%</span></div>
+        <input class="range" type="range" id="clip" min="0" max="100" step="1" value="100" />
       </div>
-      <div class="slider-header">
-        <span class="slider-desc">Cut height</span>
-        <span class="slider-badge" id="clip-value">100%</span>
-      </div>
-      <div class="slider-wrap">
-        <input type="range" id="clip" min="0" max="100" step="1" value="100" aria-label="Cut height" />
-      </div>
-    </div>
+    </section>
 
-    <!-- Export -->
-    <div class="card">
-      <div class="card-label">Export</div>
+    <section class="pcard">
+      <h2 class="pcard-label">Export</h2>
       <div class="field">
         <label for="export-format">Format</label>
-        <select id="export-format">
-          <option value="vox">.vox · MagicaVoxel</option>
-          <option value="glb">.glb · game engines</option>
-          <option value="obj">.obj · Blender</option>
-          <option value="stl">.stl · 3D print</option>
-          <option value="schem">.schem · Minecraft</option>
-        </select>
+        <div class="select-wrap"><select class="select" id="export-format">
+          <option value="vox">.vox for MagicaVoxel</option>
+          <option value="glb">.glb for game engines</option>
+          <option value="obj">.obj for Blender</option>
+          <option value="stl">.stl for 3D printing</option>
+          <option value="schem">.schem for Minecraft</option>
+        </select></div>
       </div>
-      <div class="field" id="field-voxel-mm">
-        <label for="voxel-mm">Voxel size (mm)</label>
-        <input type="number" id="voxel-mm" min="0.01" step="0.5" />
-      </div>
-      <div class="actions">
-        <button class="btn btn-secondary" id="btn-download" disabled>
-          <span class="material-symbols-outlined" style="font-size:18px;">download</span>
-          <span id="download-label">Download .vox</span>
-        </button>
-      </div>
-    </div>
+      <div class="field" id="field-voxel-mm"><label for="voxel-mm">Voxel size (mm)</label><input class="input mono" type="number" id="voxel-mm" min="0.01" step="0.5" /></div>
+      <button class="btn btn-secondary btn-wide" id="btn-download" disabled><span class="ms">download</span><span id="download-label">Download</span></button>
+    </section>
   </aside>
-
-  <!-- Bottom Center: Horizontal Quick Stats -->
-  <div class="editor-panel" id="panel-bottom-center">
-    <div class="quick-stats-bar">
-      <div class="qs-item qs-highlight">
-        <span class="material-symbols-outlined qs-icon">view_in_ar</span>
-        <div class="qs-text">
-          <div class="qs-label">Voxels</div>
-          <div class="qs-val" id="stat-count">—</div>
-        </div>
-      </div>
-      <div class="qs-item">
-        <div class="qs-text">
-          <div class="qs-label">Dimensions</div>
-          <div class="qs-val" id="stat-size">—</div>
-        </div>
-      </div>
-      <div class="qs-divider"></div>
-      <div class="qs-item">
-        <div class="qs-text">
-          <div class="qs-label">Colours</div>
-          <div class="qs-val" id="stat-colors">—</div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Bottom Left: Footer -->
-  <div class="editor-panel" id="panel-bottom-fixed">
-    <footer class="panel-footer">
-      <span class="footer-text">Emscripten · Three.js</span>
-      <span class="footer-badge">WASM</span>
-    </footer>
-  </div>
-
 </div>
 
-<script type="module" src="./main.js"></script>
+<div id="drop-overlay"><span class="glass">Drop to open</span></div>
 
+<dialog id="shortcuts" aria-labelledby="shortcuts-title" closedby="any">
+  <form method="dialog">
+    <div class="pcard-row">
+      <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+      <button class="icon-btn" aria-label="Close"><span class="ms">close</span></button>
+    </div>
+    <dl class="keys">
+      <dt><kbd>O</kbd></dt><dd>Orbit</dd>
+      <dt><kbd>B</kbd></dt><dd>Paint</dd>
+      <dt><kbd>E</kbd></dt><dd>Erase</dd>
+      <dt><kbd>A</kbd></dt><dd>Add</dd>
+      <dt><kbd>F</kbd></dt><dd>Fill region</dd>
+      <dt><kbd>I</kbd></dt><dd>Pick colour</dd>
+      <dt><kbd>X</kbd></dt><dd>Box (click two corners)</dd>
+      <dt><kbd>Esc</kbd></dt><dd>Cancel a box</dd>
+      <dt><kbd>⌘Z</kbd></dt><dd>Undo</dd>
+      <dt><kbd>⇧⌘Z</kbd></dt><dd>Redo (also <kbd>⌘Y</kbd>)</dd>
+      <dt><kbd>R</kbd></dt><dd>Reset view</dd>
+      <dt><kbd>?</kbd></dt><dd>This list</dd>
+    </dl>
+    <p class="help">With an edit tool, left-drag edits and right-drag orbits. On Windows and Linux, use Ctrl for ⌘.</p>
+  </form>
+</dialog>
+
+<script type="module" src="./main.js"></script>
 </body>
 </html>
