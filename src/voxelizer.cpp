@@ -1,49 +1,46 @@
 /**
  * voxelizer.cpp
  *
- * CPU-side GLB → VOX converter exposed via Emscripten Embind.
+ * VOXY's voxel kernel, exposed to JS via Emscripten Embind. three.js parses
+ * the model files and flattens them into one triangle mesh (web/loaders.js);
+ * this file turns that mesh into a palette-indexed voxel grid.
  *
- * Dependencies:
- *   tiny_gltf.h  (header-only, place at src/tiny_gltf.h)
- *   https://github.com/syoyo/tinygltf/blob/master/tiny_gltf.h
+ * Public API:
  *
- * Public API (one JS-visible function):
+ *   voxelize(mesh, opts, onProgress) → { sx, sy, sz, data, palette, origin, cell, count }
+ *     mesh: { positions: Float32Array (xyz), indices: Uint32Array,
+ *             uvs?: Float32Array (uv, texture transform + flipY baked in),
+ *             colors?: Float32Array (linear RGBA per vertex),
+ *             triMaterial?: Uint16Array, materials?: Float32Array (6 per material:
+ *             linear r, g, b, a, alpha cutoff, texture index or -1),
+ *             textures?: [{ width, height, data: Uint8Array (sRGB RGBA) }] }
+ *     opts: { size, axis (-1 longest, 0 x, 1 y, 2 z), solid, hollow, minIsland,
+ *             colors (auto palette size), dither, palette? (Uint8Array 256×4) }
  *
- *   convertGLBToVox(glbData    : ArrayBuffer | Uint8Array,  // .glb binary
- *                   paletteData: ArrayBuffer | Uint8Array,  // 256×4 RGBA or empty
- *                   gridSize   : number,                    // longest axis voxels
- *                   rotX, rotY : number)                    // degrees
- *     → Uint8Array   (MagicaVoxel .vox binary)
+ *   quantize(rgba, opts) → { indices, palette }
+ *     rgba: Uint8Array (n × RGBA); alpha < 128 maps to 0 (empty).
+ *     opts: { colors, palette? }
  *
- * Voxel colour assignment: each glTF primitive's material colour is extracted —
- * UV-sampled texture pixel modulated by baseColorFactor (per-vertex, averaged
- * across the triangle), or plain baseColorFactor when no texture is present —
- * and mapped to the nearest palette entry. The palette is the uploaded one, or
- * the built-in 6×6×6 RGB cube + grey ramp.
+ * Grid layout (Y-up, like glTF / three.js): data[x + sx * (y + sy * z)],
+ * 0 = empty, i = palette entry i (palette is 256 × RGBA, entry 0 unused).
+ * The returned typed arrays are views into Wasm memory, valid until the next
+ * call; the caller copies them (worker.js).
  */
 
-// ── tinygltf (header-only, implementation guard)
-// ──────────────────────────────
-#define TINYGLTF_IMPLEMENTATION
-#define TINYGLTF_NO_STB_IMAGE_WRITE // load-only: nothing here writes images
-#define STB_IMAGE_IMPLEMENTATION
-#include "tiny_gltf.h"
-
-// ── Emscripten
-// ────────────────────────────────────────────────────────────────
 #include <emscripten/bind.h> // also brings in val.h
 
-// ── STL
-// ───────────────────────────────────────────────────────────────────────
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <string>
+#include <deque>
+#include <numeric>
 #include <vector>
 
 using namespace emscripten;
+
+static constexpr int MAX_DIM = 512;
 
 // ────────────────────────────────────────────────────────────────────────────
 //  Math helpers
@@ -59,319 +56,6 @@ struct Vec3f {
 inline float dot(Vec3f a, Vec3f b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 inline Vec3f cross(Vec3f a, Vec3f b) {
   return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-//  4×4 column-major matrix (matching GLTF convention)
-// ────────────────────────────────────────────────────────────────────────────
-
-using Mat4 = std::array<float, 16>; // column-major: m[col*4 + row]
-
-static Mat4 identity4() {
-  Mat4 m{};
-  m[0] = m[5] = m[10] = m[15] = 1.f;
-  return m;
-}
-
-static Mat4 mul4(const Mat4 &a, const Mat4 &b) {
-  Mat4 r{};
-  for (int col = 0; col < 4; ++col)
-    for (int row = 0; row < 4; ++row)
-      for (int k = 0; k < 4; ++k)
-        r[col * 4 + row] += a[k * 4 + row] * b[col * 4 + k];
-  return r;
-}
-
-// glTF node transforms are affine (the spec requires TRS-decomposable
-// matrices), so w is always 1 and there is no perspective divide.
-static Vec3f transformPoint(const Mat4 &m, Vec3f p) {
-  return {m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12],
-          m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13],
-          m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14]};
-}
-
-// Build a 4×4 matrix from a tinygltf node (matrix OR TRS).
-static Mat4 nodeMatrix(const tinygltf::Node &n) {
-  // Explicit 4×4 matrix takes priority.
-  if (n.matrix.size() == 16) {
-    Mat4 m;
-    for (int i = 0; i < 16; ++i)
-      m[i] = (float)n.matrix[i];
-    return m;
-  }
-
-  Mat4 result = identity4();
-
-  // Scale
-  if (n.scale.size() == 3) {
-    Mat4 s = identity4();
-    s[0] = (float)n.scale[0];
-    s[5] = (float)n.scale[1];
-    s[10] = (float)n.scale[2];
-    result = mul4(result, s);
-  }
-
-  // Rotation (unit quaternion x,y,z,w)
-  if (n.rotation.size() == 4) {
-    float qx = (float)n.rotation[0], qy = (float)n.rotation[1],
-          qz = (float)n.rotation[2], qw = (float)n.rotation[3];
-    Mat4 r = identity4();
-    r[0] = 1 - 2 * (qy * qy + qz * qz);
-    r[1] = 2 * (qx * qy + qw * qz);
-    r[2] = 2 * (qx * qz - qw * qy);
-    r[4] = 2 * (qx * qy - qw * qz);
-    r[5] = 1 - 2 * (qx * qx + qz * qz);
-    r[6] = 2 * (qy * qz + qw * qx);
-    r[8] = 2 * (qx * qz + qw * qy);
-    r[9] = 2 * (qy * qz - qw * qx);
-    r[10] = 1 - 2 * (qx * qx + qy * qy);
-    result = mul4(result, r);
-  }
-
-  // Translation
-  if (n.translation.size() == 3) {
-    Mat4 t = identity4();
-    t[12] = (float)n.translation[0];
-    t[13] = (float)n.translation[1];
-    t[14] = (float)n.translation[2];
-    result = mul4(result, t);
-  }
-
-  return result;
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-//  Triangle
-// ────────────────────────────────────────────────────────────────────────────
-
-struct Triangle {
-  Vec3f v[3];
-  uint8_t r, g, b; // sRGB material colour extracted from glTF primitive
-};
-
-// ────────────────────────────────────────────────────────────────────────────
-//  GLTF mesh extraction  (walks scene graph, applies node world transforms)
-// ────────────────────────────────────────────────────────────────────────────
-
-static void extractMeshPrims(const tinygltf::Model &model, int meshIdx,
-                             const Mat4 &worldTx, std::vector<Triangle> &tris) {
-  const tinygltf::Mesh &mesh = model.meshes[meshIdx];
-
-  for (const tinygltf::Primitive &prim : mesh.primitives) {
-    // Only TRIANGLES mode (strips, fans, lines and points are ignored).
-    // tinygltf already defaults a missing "mode" to TRIANGLES.
-    if (prim.mode != TINYGLTF_MODE_TRIANGLES)
-      continue;
-
-    // ── POSITION accessor ──────────────────────────────────────────────
-    auto posIt = prim.attributes.find("POSITION");
-    if (posIt == prim.attributes.end())
-      continue;
-
-    const tinygltf::Accessor &posAcc = model.accessors[posIt->second];
-    const tinygltf::BufferView &posView = model.bufferViews[posAcc.bufferView];
-    const tinygltf::Buffer &posBuf = model.buffers[posView.buffer];
-
-    const size_t posStride =
-        posView.byteStride ? posView.byteStride : sizeof(float) * 3;
-
-    auto getPos = [&](size_t idx) -> Vec3f {
-      const uint8_t *base = posBuf.data.data() + posView.byteOffset +
-                            posAcc.byteOffset + idx * posStride;
-      float px, py, pz;
-      std::memcpy(&px, base, sizeof(float));
-      std::memcpy(&py, base + sizeof(float), sizeof(float));
-      std::memcpy(&pz, base + sizeof(float) * 2, sizeof(float));
-      return transformPoint(worldTx, {px, py, pz});
-    };
-
-    // ── Material: baseColorFactor + optional base colour texture ─────────
-    uint8_t bfR = 255, bfG = 255, bfB = 255;
-    bool useTexture = false;
-    const tinygltf::Image *baseColorImage = nullptr;
-    if (prim.material >= 0 && prim.material < (int)model.materials.size()) {
-      const auto &mat = model.materials[prim.material];
-      const auto &pbr = mat.pbrMetallicRoughness;
-      if (pbr.baseColorFactor.size() >= 3) {
-        bfR = (uint8_t)(std::min(1.0, pbr.baseColorFactor[0]) * 255.0 + 0.5);
-        bfG = (uint8_t)(std::min(1.0, pbr.baseColorFactor[1]) * 255.0 + 0.5);
-        bfB = (uint8_t)(std::min(1.0, pbr.baseColorFactor[2]) * 255.0 + 0.5);
-      }
-      if (pbr.baseColorTexture.index >= 0 &&
-          pbr.baseColorTexture.index < (int)model.textures.size()) {
-        const auto &tex = model.textures[pbr.baseColorTexture.index];
-        if (tex.source >= 0 && tex.source < (int)model.images.size()) {
-          const auto &img = model.images[tex.source];
-          if (!img.image.empty() && img.width > 0 && img.height > 0) {
-            baseColorImage = &img;
-            useTexture = true;
-          }
-        }
-      }
-    }
-
-    // ── UV accessor (TEXCOORD_0) ──────────────────────────────────────────
-    const uint8_t *uvBase = nullptr;
-    size_t uvStride = sizeof(float) * 2;
-    if (useTexture) {
-      auto uvIt = prim.attributes.find("TEXCOORD_0");
-      if (uvIt != prim.attributes.end()) {
-        const tinygltf::Accessor &uvAcc = model.accessors[uvIt->second];
-        const tinygltf::BufferView &uvView =
-            model.bufferViews[uvAcc.bufferView];
-        const tinygltf::Buffer &uvBuf = model.buffers[uvView.buffer];
-        uvBase = uvBuf.data.data() + uvView.byteOffset + uvAcc.byteOffset;
-        uvStride = uvView.byteStride ? uvView.byteStride : sizeof(float) * 2;
-      } else {
-        useTexture = false; // no UVs available — fall back to baseColorFactor
-      }
-    }
-
-    // Sample per-vertex colour: texture pixel × baseColorFactor, or plain
-    // factor.
-    auto sampleColor = [&](size_t idx, uint8_t out[3]) {
-      if (useTexture) {
-        const float *uv =
-            reinterpret_cast<const float *>(uvBase + idx * uvStride);
-        float u = uv[0] - std::floor(uv[0]);
-        float v = uv[1] - std::floor(uv[1]);
-        int px = std::min(baseColorImage->width - 1,
-                          (int)(u * baseColorImage->width));
-        int py = std::min(baseColorImage->height - 1,
-                          (int)(v * baseColorImage->height));
-        int ch = baseColorImage->component;
-        int pi = (py * baseColorImage->width + px) * ch;
-        out[0] = (uint8_t)((baseColorImage->image[pi + 0] * bfR) / 255);
-        out[1] = (uint8_t)((baseColorImage->image[pi + 1] * bfG) / 255);
-        out[2] = (uint8_t)((baseColorImage->image[pi + 2] * bfB) / 255);
-      } else {
-        out[0] = bfR;
-        out[1] = bfG;
-        out[2] = bfB;
-      }
-    };
-
-    auto emitTri = [&](size_t a, size_t b, size_t c) {
-      Triangle t;
-      t.v[0] = getPos(a);
-      t.v[1] = getPos(b);
-      t.v[2] = getPos(c);
-      uint8_t ca[3], cb[3], cc[3];
-      sampleColor(a, ca);
-      sampleColor(b, cb);
-      sampleColor(c, cc);
-      t.r = (uint8_t)(((int)ca[0] + cb[0] + cc[0]) / 3);
-      t.g = (uint8_t)(((int)ca[1] + cb[1] + cc[1]) / 3);
-      t.b = (uint8_t)(((int)ca[2] + cb[2] + cc[2]) / 3);
-      tris.push_back(t);
-    };
-
-    if (prim.indices >= 0) {
-      // ── Indexed geometry ───────────────────────────────────────────
-      const tinygltf::Accessor &idxAcc = model.accessors[prim.indices];
-      const tinygltf::BufferView &idxView =
-          model.bufferViews[idxAcc.bufferView];
-      const tinygltf::Buffer &idxBuf = model.buffers[idxView.buffer];
-
-      const uint8_t *rawIdx =
-          idxBuf.data.data() + idxView.byteOffset + idxAcc.byteOffset;
-
-      auto readIdx = [&](size_t i) -> size_t {
-        switch (idxAcc.componentType) {
-        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
-          return rawIdx[i];
-        }
-        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
-          uint16_t v;
-          std::memcpy(&v, rawIdx + i * 2, 2);
-          return v;
-        }
-        default: { // UNSIGNED_INT
-          uint32_t v;
-          std::memcpy(&v, rawIdx + i * 4, 4);
-          return v;
-        }
-        }
-      };
-
-      for (size_t i = 0; i + 2 < idxAcc.count; i += 3)
-        emitTri(readIdx(i), readIdx(i + 1), readIdx(i + 2));
-
-    } else {
-      // ── Non-indexed geometry ───────────────────────────────────────
-      for (size_t i = 0; i + 2 < posAcc.count; i += 3)
-        emitTri(i, i + 1, i + 2);
-    }
-  }
-}
-
-static void walkNode(const tinygltf::Model &model, int nodeIdx,
-                     const Mat4 &parentTx, std::vector<Triangle> &tris) {
-  if (nodeIdx < 0 || nodeIdx >= (int)model.nodes.size())
-    return;
-  const tinygltf::Node &node = model.nodes[nodeIdx];
-
-  Mat4 worldTx = mul4(parentTx, nodeMatrix(node));
-
-  if (node.mesh >= 0)
-    extractMeshPrims(model, node.mesh, worldTx, tris);
-
-  for (int child : node.children)
-    walkNode(model, child, worldTx, tris);
-}
-
-static std::vector<Triangle> parseGLTF(const std::string &data, float rotX,
-                                       float rotY) {
-  tinygltf::TinyGLTF loader;
-  tinygltf::Model model;
-  std::string err, warn;
-
-  // GLB magic: bytes 0..3 == 'g','l','T','F'
-  if (data.compare(0, 4, "glTF") != 0) {
-    printf("[C++] GLB load failed: Input is not a valid binary GLB format.\n");
-    return {};
-  }
-
-  if (!loader.LoadBinaryFromMemory(
-          &model, &err, &warn,
-          reinterpret_cast<const unsigned char *>(data.data()),
-          (unsigned)data.size())) {
-    printf("[C++] GLTF load failed. err=%s warn=%s\n", err.c_str(),
-           warn.c_str());
-    return {};
-  }
-
-  std::vector<Triangle> tris;
-
-  // Root rotation from the UI gizmos (degrees; 0,0 gives the identity)
-  float rx = rotX * M_PI / 180.0f;
-  float ry = rotY * M_PI / 180.0f;
-
-  Mat4 matX = identity4();
-  matX[5]  = cos(rx);
-  matX[6]  = sin(rx);
-  matX[9]  = -sin(rx);
-  matX[10] = cos(rx);
-
-  Mat4 matY = identity4();
-  matY[0]  = cos(ry);
-  matY[2]  = -sin(ry);
-  matY[8]  = sin(ry);
-  matY[10] = cos(ry);
-
-  Mat4 root = mul4(matX, matY);
-
-  // Walk every scene (typically just one)
-  for (const tinygltf::Scene &scene : model.scenes)
-    for (int ni : scene.nodes)
-      walkNode(model, ni, root, tris);
-
-  // Fallback: if no scenes defined, walk all nodes
-  if (tris.empty() && !model.nodes.empty())
-    for (int ni = 0; ni < (int)model.nodes.size(); ++ni)
-      walkNode(model, ni, root, tris);
-
-  return tris;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -414,265 +98,568 @@ static bool triBoxOverlap(Vec3f boxCenter, float halfSize, Vec3f v0, Vec3f v1,
   return std::fabs(d) <= r2;
 }
 
+// Squared distance from p to triangle abc; u, v are the barycentric weights of
+// b and c at the closest point (Ericson, Real-Time Collision Detection 5.1.5).
+static float closestOnTri(Vec3f p, Vec3f a, Vec3f b, Vec3f c, float &u,
+                          float &v) {
+  auto d2 = [&](Vec3f q) { return dot(p - q, p - q); };
+  Vec3f ab = b - a, ac = c - a, ap = p - a;
+  float d1 = dot(ab, ap), d2v = dot(ac, ap);
+  if (d1 <= 0 && d2v <= 0) { u = 0; v = 0; return d2(a); }
+  Vec3f bp = p - b;
+  float d3 = dot(ab, bp), d4 = dot(ac, bp);
+  if (d3 >= 0 && d4 <= d3) { u = 1; v = 0; return d2(b); }
+  float vc = d1 * d4 - d3 * d2v;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+    u = d1 / (d1 - d3); v = 0;
+    return d2(a + ab * u);
+  }
+  Vec3f cp = p - c;
+  float d5 = dot(ab, cp), d6 = dot(ac, cp);
+  if (d6 >= 0 && d5 <= d6) { u = 0; v = 1; return d2(c); }
+  float vb = d5 * d2v - d1 * d6;
+  if (vb <= 0 && d2v >= 0 && d6 <= 0) {
+    u = 0; v = d2v / (d2v - d6);
+    return d2(a + ac * v);
+  }
+  float va = d3 * d6 - d5 * d4;
+  if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+    v = (d4 - d3) / ((d4 - d3) + (d5 - d6)); u = 1 - v;
+    return d2(b + (c - b) * v);
+  }
+  float denom = 1 / (va + vb + vc);
+  u = vb * denom; v = vc * denom;
+  return d2(a + ab * u + ac * v);
+}
+
 // ────────────────────────────────────────────────────────────────────────────
-//  Palette  (256-entry RGBA)
+//  Colour: sRGB ↔ linear ↔ Oklab (Björn Ottosson)
+// ────────────────────────────────────────────────────────────────────────────
+
+struct Lab { float L, a, b; };
+
+static float srgbToLinear(float c) {
+  return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+static uint8_t linearToSrgb8(float c) {
+  c = std::min(1.f, std::max(0.f, c));
+  c = c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1 / 2.4f) - 0.055f;
+  return (uint8_t)(c * 255 + 0.5f);
+}
+
+static const std::array<float, 256> &linLUT() {
+  static std::array<float, 256> lut = [] {
+    std::array<float, 256> t;
+    for (int i = 0; i < 256; ++i) t[i] = srgbToLinear(i / 255.f);
+    return t;
+  }();
+  return lut;
+}
+
+static Lab toOklab(float r, float g, float b) { // linear RGB in
+  float l = std::cbrt(0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b);
+  float m = std::cbrt(0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b);
+  float s = std::cbrt(0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b);
+  return {0.2104542553f * l + 0.7936177850f * m - 0.0040720468f * s,
+          1.9779984951f * l - 2.4285922050f * m + 0.4505937099f * s,
+          0.0259040371f * l + 0.7827717662f * m - 0.8086757660f * s};
+}
+static Lab toOklab8(uint8_t r, uint8_t g, uint8_t b) {
+  const auto &lin = linLUT();
+  return toOklab(lin[r], lin[g], lin[b]);
+}
+static void fromOklab(Lab c, float &r, float &g, float &b) { // linear RGB out
+  float l = c.L + 0.3963377774f * c.a + 0.2158037573f * c.b;
+  float m = c.L - 0.1055613458f * c.a - 0.0638541728f * c.b;
+  float s = c.L - 0.0894841775f * c.a - 1.2914855480f * c.b;
+  l = l * l * l; m = m * m * m; s = s * s * s;
+  r = +4.0767416621f * l - 3.3077115913f * m + 0.2309699292f * s;
+  g = -1.2684380046f * l + 2.6097574011f * m - 0.3413193965f * s;
+  b = -0.0041960863f * l - 0.7034186147f * m + 1.7076147010f * s;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Palette  (256-entry RGBA; entry 0 unused, the empty voxel)
 // ────────────────────────────────────────────────────────────────────────────
 
 using Palette = std::array<std::array<uint8_t, 4>, 256>;
+static_assert(sizeof(Palette) == 256 * 4, "Palette must be tightly packed");
 
-// Produces 256 entries that cover the full RGB gamut:
-//   Indices   0–215  — 6×6×6 colour cube; each channel ∈ {0,51,102,153,204,255}
-//   Indices 216–255  — 40-step grayscale ramp (0..255)
-// Index 0 happens to be black, which is the VOX "transparent/reserved" slot —
-// the voxeliser never emits colour index 0 so this is safe.
-static Palette defaultPalette() {
-  Palette p{};
-  int idx = 0;
-
-  // 6×6×6 colour cube — 216 entries
-  for (int r = 0; r < 6; ++r)
-    for (int g = 0; g < 6; ++g)
-      for (int b = 0; b < 6; ++b, ++idx)
-        p[idx] = {(uint8_t)(r * 51), (uint8_t)(g * 51), (uint8_t)(b * 51), 255};
-
-  // 40-step grayscale ramp — fills remainder to exactly 256
-  for (int i = 0; i < 40; ++i, ++idx) {
-    uint8_t v = (uint8_t)(i * 255 / 39);
-    p[idx] = {v, v, v, 255};
-  }
-
-  return p;
+// Colours are bucketed to 5 bits per channel: the histogram key and the
+// nearest-colour cache key. Bucket means keep flat colours exact.
+static inline int key15(uint8_t r, uint8_t g, uint8_t b) {
+  return (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3);
 }
 
-// Accept the raw 256×4 RGBA bytes main.js builds from the uploaded .hex
-// palette; anything else (i.e. empty) selects the default palette.
-static Palette parsePaletteRGBA(const std::string &raw) {
-  static_assert(sizeof(Palette) == 256 * 4, "Palette must be tightly packed");
-  if (raw.size() != sizeof(Palette))
-    return defaultPalette();
-  Palette p;
-  std::memcpy(p.data(), raw.data(), sizeof(Palette));
-  return p;
-}
-
-// Returns the 1-based palette index (1–255) whose sRGB triple is closest to
-// (r,g,b) in squared Euclidean RGB space. Index 0 is always skipped because
-// the VOX format reserves it as the "empty voxel" sentinel.
-static uint8_t findNearestColor(const Palette &pal, uint8_t r, uint8_t g,
-                                uint8_t b) {
-  int best = 1;
-  int bestDist = 3 * 255 * 255 + 1; // larger than any possible distance
-  for (int i = 1; i < 256; ++i) {
-    int dr = (int)pal[i][0] - r;
-    int dg = (int)pal[i][1] - g;
-    int db = (int)pal[i][2] - b;
-    int d = dr * dr + dg * dg + db * db;
-    if (d < bestDist) {
-      bestDist = d;
-      best = i;
-      if (d == 0)
-        break; // exact match — no need to search further
-    }
-  }
-  return (uint8_t)best;
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-//  Voxel grid
-// ────────────────────────────────────────────────────────────────────────────
-
-struct VoxGrid {
-  int sx, sy, sz;
-  std::vector<uint8_t> data; // [z*sy*sx + y*sx + x]
-
-  VoxGrid(int x, int y, int z)
-      : sx(x), sy(y), sz(z), data((size_t)x * y * z, 0) {}
-
-  void set(int x, int y, int z, uint8_t col) {
-    if (x < 0 || y < 0 || z < 0 || x >= sx || y >= sy || z >= sz)
-      return;
-    data[(size_t)z * sy * sx + y * sx + x] = col;
-  }
-  uint8_t get(int x, int y, int z) const {
-    if (x < 0 || y < 0 || z < 0 || x >= sx || y >= sy || z >= sz)
-      return 0;
-    return data[(size_t)z * sy * sx + y * sx + x];
+struct Histogram {
+  std::vector<uint32_t> n, r, g, b; // count and sRGB sums per 15-bit bucket
+  Histogram() : n(32768), r(32768), g(32768), b(32768) {}
+  void add(uint8_t cr, uint8_t cg, uint8_t cb) {
+    int k = key15(cr, cg, cb);
+    n[k]++; r[k] += cr; g[k] += cg; b[k] += cb;
   }
 };
 
-// ────────────────────────────────────────────────────────────────────────────
-//  Voxelisation
-//  Each voxel takes the nearest palette index to its triangle's colour.
-// ────────────────────────────────────────────────────────────────────────────
-
-static VoxGrid voxelise(const std::vector<Triangle> &tris, int gridSize,
-                        const Palette &pal) {
-  if (tris.empty())
-    return VoxGrid(1, 1, 1);
-
-  // ── bounding box ─────────────────────────────────────────────────────────
-  Vec3f mn{1e30f, 1e30f, 1e30f};
-  Vec3f mx{-1e30f, -1e30f, -1e30f};
-  for (const auto &t : tris)
-    for (const auto &v : t.v) {
-      mn.x = std::min(mn.x, v.x);
-      mn.y = std::min(mn.y, v.y);
-      mn.z = std::min(mn.z, v.z);
-      mx.x = std::max(mx.x, v.x);
-      mx.y = std::max(mx.y, v.y);
-      mx.z = std::max(mx.z, v.z);
+// Median cut in Oklab: repeatedly split the box with the largest weighted
+// squared error at the weighted median of its widest axis. Fills entries
+// 1..k of pal and returns k (≤ nColors).
+static int medianCut(const Histogram &h, int nColors, Palette &pal) {
+  struct Entry { float c[3]; float w; };
+  std::vector<Entry> e;
+  for (int k = 0; k < 32768; ++k)
+    if (h.n[k]) {
+      float w = (float)h.n[k];
+      Lab c = toOklab8(h.r[k] / h.n[k], h.g[k] / h.n[k], h.b[k] / h.n[k]);
+      e.push_back({{c.L, c.a, c.b}, w});
     }
+  if (e.empty()) return 0;
 
-  float span = std::max({mx.x - mn.x, mx.y - mn.y, mx.z - mn.z});
-  if (span < 1e-9f)
-    span = 1.0f;
-  float cellSize = span / (float)gridSize;
-  float invCell = 1.0f / cellSize;
-
-  // ── allocate grid (longest axis = gridSize, others proportional) ──────────
-  int gx = std::max(1, std::min(256, (int)std::ceil((mx.x - mn.x) * invCell)));
-  int gy = std::max(1, std::min(256, (int)std::ceil((mx.y - mn.y) * invCell)));
-  int gz = std::max(1, std::min(256, (int)std::ceil((mx.z - mn.z) * invCell)));
-
-  VoxGrid grid(gx, gy, gz);
-  float half = cellSize * 0.5f;
-  int nTris = (int)tris.size();
-
-  // Pre-compute nearest-palette index for every triangle so findNearestColor
-  // is called O(N_tris) times, not O(N_voxels) times.
-  std::vector<uint8_t> triColor(nTris);
-  for (int ti = 0; ti < nTris; ++ti)
-    triColor[ti] = findNearestColor(pal, tris[ti].r, tris[ti].g, tris[ti].b);
-
-  for (int ti = 0; ti < nTris; ++ti) {
-    const Triangle &tri = tris[ti];
-
-    float txmn = 1e30f, tymn = 1e30f, tzmn = 1e30f;
-    float txmx = -1e30f, tymx = -1e30f, tzmx = -1e30f;
-    for (const auto &v : tri.v) {
-      float lx = (v.x - mn.x) * invCell, ly = (v.y - mn.y) * invCell,
-            lz = (v.z - mn.z) * invCell;
-      txmn = std::min(txmn, lx);
-      txmx = std::max(txmx, lx);
-      tymn = std::min(tymn, ly);
-      tymx = std::max(tymx, ly);
-      tzmn = std::min(tzmn, lz);
-      tzmx = std::max(tzmx, lz);
+  struct Box { int lo, hi; float sse; int axis; float mean[3]; };
+  std::vector<int> ord(e.size());
+  std::iota(ord.begin(), ord.end(), 0);
+  auto stats = [&](Box &bx) {
+    double w = 0, s[3] = {0, 0, 0}, q[3] = {0, 0, 0};
+    for (int i = bx.lo; i < bx.hi; ++i) {
+      const Entry &x = e[ord[i]];
+      w += x.w;
+      for (int a = 0; a < 3; ++a) { s[a] += x.w * x.c[a]; q[a] += x.w * x.c[a] * x.c[a]; }
     }
-
-    int x0 = std::max(0, (int)std::floor(txmn)),
-        x1 = std::min(gx - 1, (int)std::floor(txmx));
-    int y0 = std::max(0, (int)std::floor(tymn)),
-        y1 = std::min(gy - 1, (int)std::floor(tymx));
-    int z0 = std::max(0, (int)std::floor(tzmn)),
-        z1 = std::min(gz - 1, (int)std::floor(tzmx));
-
-    for (int zi = z0; zi <= z1; ++zi)
-      for (int yi = y0; yi <= y1; ++yi)
-        for (int xi = x0; xi <= x1; ++xi) {
-          Vec3f centre{mn.x + (xi + 0.5f) * cellSize,
-                       mn.y + (yi + 0.5f) * cellSize,
-                       mn.z + (zi + 0.5f) * cellSize};
-          if (triBoxOverlap(centre, half, tri.v[0], tri.v[1], tri.v[2]))
-            grid.set(xi, yi, zi, triColor[ti]);
-        }
-  }
-  return grid;
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-//  VOX binary serialiser
-// ────────────────────────────────────────────────────────────────────────────
-
-static void pushU32(std::vector<uint8_t> &buf, uint32_t v) {
-  buf.push_back((v) & 0xFF);
-  buf.push_back((v >> 8) & 0xFF);
-  buf.push_back((v >> 16) & 0xFF);
-  buf.push_back((v >> 24) & 0xFF);
-}
-
-static std::vector<uint8_t> encodeVox(const VoxGrid &grid, const Palette &pal) {
-  std::vector<uint8_t> sizeChunk;
-  pushU32(sizeChunk, (uint32_t)grid.sx);
-  pushU32(sizeChunk, (uint32_t)grid.sy);
-  pushU32(sizeChunk, (uint32_t)grid.sz);
-
-  // XYZI: voxel count (patched in after the scan), then x,y,z,colour each.
-  std::vector<uint8_t> xyziChunk(4);
-  for (int z = 0; z < grid.sz; ++z)
-    for (int y = 0; y < grid.sy; ++y)
-      for (int x = 0; x < grid.sx; ++x)
-        if (uint8_t c = grid.get(x, y, z))
-          xyziChunk.insert(xyziChunk.end(),
-                           {(uint8_t)x, (uint8_t)y, (uint8_t)z, c});
-  uint32_t nVoxels = (uint32_t)(xyziChunk.size() / 4 - 1);
-  for (int i = 0; i < 4; ++i)
-    xyziChunk[i] = (uint8_t)(nVoxels >> (8 * i)); // little-endian, as pushU32
-
-  // RGBA: entry i holds colour index i+1 (index 0 is the empty voxel), so the
-  // palette is stored rotated left by one.
-  std::vector<uint8_t> rgbaChunk(1024);
-  for (int i = 0; i < 256; ++i)
-    std::memcpy(&rgbaChunk[i * 4], pal[(i + 1) & 255].data(), 4);
-
-  auto writeChunk = [](std::vector<uint8_t> &dst, const char id[4],
-                       const std::vector<uint8_t> &content,
-                       uint32_t childBytes = 0) {
-    dst.insert(dst.end(), id, id + 4);
-    pushU32(dst, (uint32_t)content.size());
-    pushU32(dst, childBytes);
-    dst.insert(dst.end(), content.begin(), content.end());
+    double best = -1;
+    bx.sse = 0;
+    for (int a = 0; a < 3; ++a) {
+      double mean = s[a] / w, var = q[a] - w * mean * mean;
+      bx.mean[a] = (float)mean;
+      bx.sse += (float)var;
+      if (var > best) { best = var; bx.axis = a; }
+    }
   };
 
-  std::vector<uint8_t> mainChildren;
-  writeChunk(mainChildren, "SIZE", sizeChunk);
-  writeChunk(mainChildren, "XYZI", xyziChunk);
-  writeChunk(mainChildren, "RGBA", rgbaChunk);
+  std::vector<Box> boxes{{0, (int)e.size(), 0, 0, {0, 0, 0}}};
+  stats(boxes[0]);
+  while ((int)boxes.size() < nColors) {
+    int pick = -1;
+    for (int i = 0; i < (int)boxes.size(); ++i)
+      if (boxes[i].hi - boxes[i].lo > 1 && (pick < 0 || boxes[i].sse > boxes[pick].sse))
+        pick = i;
+    if (pick < 0) break;
+    Box bx = boxes[pick];
+    int ax = bx.axis;
+    std::sort(ord.begin() + bx.lo, ord.begin() + bx.hi,
+              [&](int a, int b) { return e[a].c[ax] < e[b].c[ax]; });
+    double total = 0, acc = 0;
+    for (int i = bx.lo; i < bx.hi; ++i) total += e[ord[i]].w;
+    int mid = bx.lo + 1;
+    for (int i = bx.lo; i < bx.hi; ++i) {
+      acc += e[ord[i]].w;
+      if (acc >= total / 2) { mid = i + 1; break; }
+    }
+    mid = std::min(std::max(mid, bx.lo + 1), bx.hi - 1);
+    Box a{bx.lo, mid, 0, 0, {0, 0, 0}}, b{mid, bx.hi, 0, 0, {0, 0, 0}};
+    stats(a);
+    stats(b);
+    boxes[pick] = a;
+    boxes.push_back(b);
+  }
 
-  std::vector<uint8_t> out;
-  out.reserve(12 + 12 + mainChildren.size());
-  out.insert(out.end(), {'V', 'O', 'X', ' '});
-  pushU32(out, 150);
-  writeChunk(out, "MAIN", {}, (uint32_t)mainChildren.size());
-  out.insert(out.end(), mainChildren.begin(), mainChildren.end());
+  for (int i = 0; i < (int)boxes.size(); ++i) {
+    float r, g, b;
+    fromOklab({boxes[i].mean[0], boxes[i].mean[1], boxes[i].mean[2]}, r, g, b);
+    pal[i + 1] = {linearToSrgb8(r), linearToSrgb8(g), linearToSrgb8(b), 255};
+  }
+  return (int)boxes.size();
+}
 
+// Maps colours to the nearest of palette entries 1..n (Oklab distance),
+// cached per 15-bit colour bucket. Entries with alpha 0 are never chosen
+// (a sparse fixed palette, e.g. Minecraft blocks, leaves them empty).
+struct ColorMapper {
+  std::vector<Lab> lab;
+  std::vector<bool> usable;
+  int n;
+  std::vector<uint8_t> cache = std::vector<uint8_t>(32768, 0);
+  ColorMapper(const Palette &pal, int n) : lab(n + 1), usable(n + 1), n(n) {
+    bool any = false;
+    for (int i = 1; i <= n; ++i) {
+      lab[i] = toOklab8(pal[i][0], pal[i][1], pal[i][2]);
+      any |= usable[i] = pal[i][3] > 0;
+    }
+    if (!any) usable.assign(n + 1, true);
+  }
+  uint8_t map(uint8_t r, uint8_t g, uint8_t b) {
+    int k = key15(r, g, b);
+    if (!cache[k]) {
+      Lab c = toOklab8((k >> 10) * 8 + 4, ((k >> 5) & 31) * 8 + 4, (k & 31) * 8 + 4);
+      float best = 1e30f;
+      for (int i = 1; i <= n; ++i) {
+        if (!usable[i]) continue;
+        float dL = lab[i].L - c.L, da = lab[i].a - c.a, db = lab[i].b - c.b;
+        float d = dL * dL + da * da + db * db;
+        if (d < best) { best = d; cache[k] = (uint8_t)i; }
+      }
+    }
+    return cache[k];
+  }
+};
+
+// Palette from opts: a fixed 256×4 palette (entries 1..255) or median cut
+// over the histogram. Returns the number of usable entries.
+static int choosePalette(val opts, const Histogram &h, Palette &pal) {
+  pal = {};
+  val fixed = opts["palette"];
+  if (!fixed.isUndefined() && !fixed.isNull()) {
+    auto bytes = convertJSArrayToNumberVector<uint8_t>(fixed);
+    if (bytes.size() == sizeof(Palette)) {
+      std::memcpy(pal.data(), bytes.data(), sizeof(Palette));
+      return 255;
+    }
+  }
+  val c = opts["colors"];
+  int nColors = c.isUndefined() ? 255 : std::min(255, std::max(1, c.as<int>()));
+  return medianCut(h, nColors, pal);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Mesh input
+// ────────────────────────────────────────────────────────────────────────────
+
+struct Material { float r, g, b, a, cutoff; int tex; };
+struct Texture { int w, h; std::vector<uint8_t> px; };
+
+struct Mesh {
+  std::vector<float> pos, uv, col;
+  std::vector<uint32_t> idx;
+  std::vector<uint16_t> triMat;
+  std::vector<Material> mats;
+  std::vector<Texture> texs;
+};
+
+template <typename T> static std::vector<T> vecOf(val v) {
+  return v.isUndefined() || v.isNull() ? std::vector<T>{}
+                                       : convertJSArrayToNumberVector<T>(v);
+}
+
+static int optInt(val o, const char *k, int def) {
+  val v = o[k];
+  return v.isUndefined() || v.isNull() ? def : v.as<int>();
+}
+
+static Mesh readMesh(val jm) {
+  Mesh m;
+  m.pos = vecOf<float>(jm["positions"]);
+  m.idx = vecOf<uint32_t>(jm["indices"]);
+  m.uv = vecOf<float>(jm["uvs"]);
+  m.col = vecOf<float>(jm["colors"]);
+  m.triMat = vecOf<uint16_t>(jm["triMaterial"]);
+  auto mf = vecOf<float>(jm["materials"]);
+  for (size_t i = 0; i + 5 < mf.size(); i += 6)
+    m.mats.push_back({mf[i], mf[i + 1], mf[i + 2], mf[i + 3], mf[i + 4], (int)mf[i + 5]});
+  if (m.mats.empty()) m.mats.push_back({1, 1, 1, 1, 0, -1});
+  val tx = jm["textures"];
+  int nt = tx.isUndefined() ? 0 : tx["length"].as<int>();
+  for (int i = 0; i < nt; ++i)
+    m.texs.push_back({tx[i]["width"].as<int>(), tx[i]["height"].as<int>(),
+                      vecOf<uint8_t>(tx[i]["data"])});
+  return m;
+}
+
+// Colour of triangle t at barycentric (u, v): base × texture × vertex colour in
+// linear light. Returns false when the alpha is under the material's cutoff.
+static bool sampleColor(const Mesh &m, uint32_t t, float u, float v, uint8_t out[3]) {
+  const auto &lin = linLUT();
+  uint32_t i0 = m.idx[3 * t], i1 = m.idx[3 * t + 1], i2 = m.idx[3 * t + 2];
+  float w0 = 1 - u - v;
+  int mi = m.triMat.empty() ? 0 : m.triMat[t];
+  const Material &mat = m.mats[mi < (int)m.mats.size() ? mi : 0];
+  float r = mat.r, g = mat.g, b = mat.b, a = mat.a;
+  if (mat.tex >= 0 && mat.tex < (int)m.texs.size() && !m.uv.empty()) {
+    const Texture &tx = m.texs[mat.tex];
+    float tu = w0 * m.uv[2 * i0] + u * m.uv[2 * i1] + v * m.uv[2 * i2];
+    float tv = w0 * m.uv[2 * i0 + 1] + u * m.uv[2 * i1 + 1] + v * m.uv[2 * i2 + 1];
+    tu -= std::floor(tu);
+    tv -= std::floor(tv);
+    if (!std::isfinite(tu) || !std::isfinite(tv)) tu = tv = 0;
+    int px = std::min(tx.w - 1, (int)(tu * tx.w));
+    int py = std::min(tx.h - 1, (int)(tv * tx.h));
+    const uint8_t *p = &tx.px[4 * ((size_t)py * tx.w + px)];
+    r *= lin[p[0]]; g *= lin[p[1]]; b *= lin[p[2]]; a *= p[3] / 255.f;
+  }
+  if (!m.col.empty()) {
+    const float *c0 = &m.col[4 * i0], *c1 = &m.col[4 * i1], *c2 = &m.col[4 * i2];
+    r *= w0 * c0[0] + u * c1[0] + v * c2[0];
+    g *= w0 * c0[1] + u * c1[1] + v * c2[1];
+    b *= w0 * c0[2] + u * c1[2] + v * c2[2];
+    a *= w0 * c0[3] + u * c1[3] + v * c2[3];
+  }
+  if (a < mat.cutoff) return false;
+  out[0] = linearToSrgb8(r);
+  out[1] = linearToSrgb8(g);
+  out[2] = linearToSrgb8(b);
+  return true;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Grid post-processing
+// ────────────────────────────────────────────────────────────────────────────
+
+struct Dims {
+  int sx, sy, sz;
+  size_t n() const { return (size_t)sx * sy * sz; }
+};
+
+// Calls f(neighbour index) for each in-grid 6-neighbour of cell i.
+template <typename F> static void forNeighbours(const Dims &d, size_t i, F f) {
+  int x = i % d.sx, y = (i / d.sx) % d.sy, z = i / ((size_t)d.sx * d.sy);
+  size_t sxy = (size_t)d.sx * d.sy;
+  if (x > 0) f(i - 1);
+  if (x < d.sx - 1) f(i + 1);
+  if (y > 0) f(i - d.sx);
+  if (y < d.sy - 1) f(i + d.sx);
+  if (z > 0) f(i - sxy);
+  if (z < d.sz - 1) f(i + sxy);
+}
+
+static bool onBorder(const Dims &d, size_t i) {
+  int x = i % d.sx, y = (i / d.sx) % d.sy, z = i / ((size_t)d.sx * d.sy);
+  return x == 0 || y == 0 || z == 0 || x == d.sx - 1 || y == d.sy - 1 || z == d.sz - 1;
+}
+
+// Empty cells reachable from outside the grid through empty cells.
+static std::vector<bool> floodOutside(const Dims &d, const std::vector<uint8_t> &g) {
+  std::vector<bool> out(d.n());
+  std::deque<size_t> q;
+  for (size_t i = 0; i < d.n(); ++i)
+    if (!g[i] && onBorder(d, i)) { out[i] = true; q.push_back(i); }
+  while (!q.empty()) {
+    size_t i = q.front();
+    q.pop_front();
+    forNeighbours(d, i, [&](size_t j) {
+      if (!g[j] && !out[j]) { out[j] = true; q.push_back(j); }
+    });
+  }
   return out;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-//  Public Embind entry point
-// ────────────────────────────────────────────────────────────────────────────
+// Solid fill: every empty cell not reachable from outside is interior and
+// copies the colour of the previous voxel along its x row (always set: the
+// cell before an interior cell is either a voxel or interior itself).
+static void fillInterior(const Dims &d, std::vector<uint8_t> &g,
+                         const std::vector<bool> &outside) {
+  for (size_t row = 0; row < (size_t)d.sy * d.sz; ++row) {
+    uint8_t last = 0;
+    for (int x = 0; x < d.sx; ++x) {
+      size_t i = row * d.sx + x;
+      if (g[i]) last = g[i];
+      else if (!outside[i]) g[i] = last;
+    }
+  }
+}
 
-// Persistent output buffer — keeps the typed_memory_view alive until the next
-// call (JS worker.js calls .slice() on the result immediately after returning).
-static std::vector<uint8_t> g_result;
+// Keeps voxels within k steps of the outside (air reachable from outside, or
+// the grid border); clears the rest.
+static void hollow(const Dims &d, std::vector<uint8_t> &g,
+                   const std::vector<bool> &outside, int k) {
+  std::vector<bool> keep(d.n());
+  std::vector<size_t> frontier, next;
+  for (size_t i = 0; i < d.n(); ++i) {
+    if (!g[i]) continue;
+    bool exposed = onBorder(d, i);
+    forNeighbours(d, i, [&](size_t j) { exposed |= !g[j] && outside[j]; });
+    if (exposed) { keep[i] = true; frontier.push_back(i); }
+  }
+  for (int depth = 1; depth < k; ++depth) {
+    next.clear();
+    for (size_t i : frontier)
+      forNeighbours(d, i, [&](size_t j) {
+        if (g[j] && !keep[j]) { keep[j] = true; next.push_back(j); }
+      });
+    frontier.swap(next);
+  }
+  for (size_t i = 0; i < d.n(); ++i)
+    if (!keep[i]) g[i] = 0;
+}
 
-/**
- * convertGLBToVox
- *
- * @param glb         Raw .glb bytes (embind copies an ArrayBuffer/Uint8Array
- *                    into the std::string)
- * @param palRGBA     Flat 256×4 RGBA bytes (empty = use default palette)
- * @param gridSize    Voxel resolution along the longest axis (1–256)
- * @param rotX, rotY  Root rotation in degrees
- * @return            MagicaVoxel .vox binary as a typed_memory_view
- * (Uint8Array)
- */
-static val convertGLBToVox(const std::string &glb, const std::string &palRGBA,
-                           int gridSize, float rotX, float rotY) {
-  gridSize = std::max(1, std::min(256, gridSize));
-
-  auto pal = parsePaletteRGBA(palRGBA);
-  auto grid = voxelise(parseGLTF(glb, rotX, rotY), gridSize, pal);
-  g_result = encodeVox(grid, pal);
-
-  return val(typed_memory_view(g_result.size(), g_result.data()));
+// Clears 6-connected components with fewer than minSize voxels.
+static void removeIslands(const Dims &d, std::vector<uint8_t> &g, int minSize) {
+  std::vector<bool> seen(d.n());
+  std::vector<size_t> comp;
+  std::deque<size_t> q;
+  for (size_t s = 0; s < d.n(); ++s) {
+    if (!g[s] || seen[s]) continue;
+    comp.clear();
+    seen[s] = true;
+    q.push_back(s);
+    while (!q.empty()) {
+      size_t i = q.front();
+      q.pop_front();
+      comp.push_back(i);
+      forNeighbours(d, i, [&](size_t j) {
+        if (g[j] && !seen[j]) { seen[j] = true; q.push_back(j); }
+      });
+    }
+    if ((int)comp.size() < minSize)
+      for (size_t i : comp) g[i] = 0;
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-//  Emscripten bindings
+//  Public Embind entry points
 // ────────────────────────────────────────────────────────────────────────────
 
+// Persistent output buffers — the returned typed_memory_views stay valid
+// until the next call (worker.js copies them immediately).
+static std::vector<uint8_t> g_out;
+static Palette g_pal;
+
+static val paletteView() {
+  return val(typed_memory_view(sizeof(Palette), g_pal[0].data()));
+}
+
+static val voxelize(val jsMesh, val opts, val onProgress) {
+  Mesh m = readMesh(jsMesh);
+  auto progress = [&](double p) {
+    if (!onProgress.isUndefined()) onProgress(p);
+  };
+
+  const size_t nv = m.pos.size() / 3, nt = m.idx.size() / 3;
+  Vec3f mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
+  for (size_t i = 0; i < nv; ++i) {
+    Vec3f p{m.pos[3 * i], m.pos[3 * i + 1], m.pos[3 * i + 2]};
+    mn = {std::min(mn.x, p.x), std::min(mn.y, p.y), std::min(mn.z, p.z)};
+    mx = {std::max(mx.x, p.x), std::max(mx.y, p.y), std::max(mx.z, p.z)};
+  }
+  if (nt == 0 || nv == 0) mn = mx = {0, 0, 0};
+
+  // ── grid size: `size` voxels along the chosen axis, ≤ MAX_DIM on every axis
+  const float ext[3] = {mx.x - mn.x, mx.y - mn.y, mx.z - mn.z};
+  const float longest = std::max({ext[0], ext[1], ext[2], 1e-9f});
+  const int axis = optInt(opts, "axis", -1);
+  const int size = std::min(MAX_DIM, std::max(1, optInt(opts, "size", 64)));
+  float span = axis >= 0 && axis < 3 && ext[axis] > 1e-9f ? ext[axis] : longest;
+  float cell = std::max(span / size, longest / MAX_DIM);
+  const float inv = 1 / cell;
+  Dims d{std::max(1, std::min(MAX_DIM, (int)std::ceil(ext[0] * inv))),
+         std::max(1, std::min(MAX_DIM, (int)std::ceil(ext[1] * inv))),
+         std::max(1, std::min(MAX_DIM, (int)std::ceil(ext[2] * inv)))};
+
+  // Vertices in grid space (one unit per voxel).
+  std::vector<Vec3f> gp(nv);
+  for (size_t i = 0; i < nv; ++i)
+    gp[i] = Vec3f{m.pos[3 * i] - mn.x, m.pos[3 * i + 1] - mn.y, m.pos[3 * i + 2] - mn.z} * inv;
+  auto cellOf = [](float c, int n) { return std::min(n - 1, std::max(0, (int)std::floor(c))); };
+
+  // ── surface voxels, one z layer at a time: every triangle overlapping a
+  //    voxel competes, the one closest to the voxel centre sets its colour.
+  std::vector<std::vector<uint32_t>> layers(d.sz);
+  for (uint32_t t = 0; t < nt; ++t) {
+    if (std::max({m.idx[3 * t], m.idx[3 * t + 1], m.idx[3 * t + 2]}) >= nv) continue;
+    const Vec3f &a = gp[m.idx[3 * t]], &b = gp[m.idx[3 * t + 1]], &c = gp[m.idx[3 * t + 2]];
+    // Skip non-finite and zero-area triangles (their barycentrics are NaN).
+    Vec3f n = cross(b - a, c - a);
+    if (!(dot(n, n) > 1e-12f) || !std::isfinite(a.x + a.y + a.z + b.x + b.y + b.z + c.x + c.y + c.z))
+      continue;
+    int z0 = cellOf(std::min({a.z, b.z, c.z}), d.sz), z1 = cellOf(std::max({a.z, b.z, c.z}), d.sz);
+    for (int z = z0; z <= z1; ++z) layers[z].push_back(t);
+  }
+
+  struct Surface { uint32_t i; uint8_t r, g, b; };
+  std::vector<Surface> surface;
+  Histogram hist;
+  const size_t layerN = (size_t)d.sx * d.sy;
+  std::vector<float> bestD(layerN), bestU(layerN), bestV(layerN);
+  std::vector<int64_t> bestT(layerN);
+  for (int z = 0; z < d.sz; ++z) {
+    std::fill(bestD.begin(), bestD.end(), 1e30f);
+    std::fill(bestT.begin(), bestT.end(), -1);
+    for (uint32_t t : layers[z]) {
+      const Vec3f &a = gp[m.idx[3 * t]], &b = gp[m.idx[3 * t + 1]], &c = gp[m.idx[3 * t + 2]];
+      int x0 = cellOf(std::min({a.x, b.x, c.x}), d.sx), x1 = cellOf(std::max({a.x, b.x, c.x}), d.sx);
+      int y0 = cellOf(std::min({a.y, b.y, c.y}), d.sy), y1 = cellOf(std::max({a.y, b.y, c.y}), d.sy);
+      for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x) {
+          Vec3f centre{x + 0.5f, y + 0.5f, z + 0.5f};
+          if (!triBoxOverlap(centre, 0.5f, a, b, c)) continue;
+          float u, v, dist = closestOnTri(centre, a, b, c, u, v);
+          size_t li = (size_t)y * d.sx + x;
+          if (dist < bestD[li]) { bestD[li] = dist; bestT[li] = t; bestU[li] = u; bestV[li] = v; }
+        }
+    }
+    for (size_t li = 0; li < layerN; ++li) {
+      uint8_t rgb[3];
+      if (bestT[li] < 0 || !sampleColor(m, (uint32_t)bestT[li], bestU[li], bestV[li], rgb)) continue;
+      surface.push_back({(uint32_t)(li + (size_t)z * layerN), rgb[0], rgb[1], rgb[2]});
+      hist.add(rgb[0], rgb[1], rgb[2]);
+    }
+    std::vector<uint32_t>().swap(layers[z]);
+    if (z % std::max(1, d.sz / 100) == 0) progress(0.8 * (z + 1) / d.sz);
+  }
+
+  // ── colour: palette, then nearest entry with optional ordered dither
+  int nPal = choosePalette(opts, hist, g_pal);
+  ColorMapper mapper(g_pal, std::max(1, nPal));
+  const bool dither = !opts["dither"].isUndefined() && opts["dither"].as<bool>();
+  static const int bayer[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+  const float spread = std::max(8.f, 255.f / std::cbrt((float)std::max(1, nPal)));
+  g_out.assign(d.n(), 0);
+  for (const Surface &s : surface) {
+    uint8_t r = s.r, g = s.g, b = s.b;
+    if (dither) {
+      int x = s.i % d.sx, y = (s.i / d.sx) % d.sy, z = s.i / layerN;
+      float off = ((bayer[(x + 2 * z) & 3][(y + 3 * z) & 3] + 0.5f) / 16 - 0.5f) * spread;
+      auto adj = [&](uint8_t c) { return (uint8_t)std::min(255.f, std::max(0.f, c + off)); };
+      r = adj(r); g = adj(g); b = adj(b);
+    }
+    g_out[s.i] = nPal ? mapper.map(r, g, b) : 1;
+  }
+  std::vector<Surface>().swap(surface);
+  progress(0.9);
+
+  // ── post: solid fill, hollow, islands
+  if (!opts["solid"].isUndefined() && opts["solid"].as<bool>()) {
+    auto outside = floodOutside(d, g_out);
+    fillInterior(d, g_out, outside);
+    int k = optInt(opts, "hollow", 0);
+    if (k > 0) hollow(d, g_out, outside, k);
+  }
+  int minIsland = optInt(opts, "minIsland", 0);
+  if (minIsland > 1) removeIslands(d, g_out, minIsland);
+  progress(1);
+
+  size_t count = 0;
+  for (uint8_t c : g_out) count += c != 0;
+
+  val origin = val::array();
+  origin.call<void>("push", mn.x, mn.y, mn.z);
+  val out = val::object();
+  out.set("sx", d.sx);
+  out.set("sy", d.sy);
+  out.set("sz", d.sz);
+  out.set("data", val(typed_memory_view(g_out.size(), g_out.data())));
+  out.set("palette", paletteView());
+  out.set("origin", origin);
+  out.set("cell", cell);
+  out.set("count", (double)count);
+  return out;
+}
+
+static val quantize(val jsRGBA, val opts) {
+  auto px = vecOf<uint8_t>(jsRGBA);
+  size_t n = px.size() / 4;
+  Histogram hist;
+  for (size_t i = 0; i < n; ++i)
+    if (px[4 * i + 3] >= 128) hist.add(px[4 * i], px[4 * i + 1], px[4 * i + 2]);
+  int nPal = choosePalette(opts, hist, g_pal);
+  ColorMapper mapper(g_pal, std::max(1, nPal));
+  g_out.assign(n, 0);
+  for (size_t i = 0; i < n; ++i)
+    if (px[4 * i + 3] >= 128)
+      g_out[i] = nPal ? mapper.map(px[4 * i], px[4 * i + 1], px[4 * i + 2]) : 1;
+  val out = val::object();
+  out.set("indices", val(typed_memory_view(g_out.size(), g_out.data())));
+  out.set("palette", paletteView());
+  return out;
+}
+
 EMSCRIPTEN_BINDINGS(voxelizer_module) {
-  function("convertGLBToVox", &convertGLBToVox);
+  function("voxelize", &voxelize);
+  function("quantize", &quantize);
 }

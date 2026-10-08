@@ -1,110 +1,24 @@
 /**
- * preview.js — Three.js voxel renderer
+ * preview.js — three.js viewport.
  *
- * Key design decisions:
- *  1. ONE THREE.InstancedMesh per scene.  On every update only the matrix /
- *     colour buffers are patched in-place; the mesh geometry and the scene
- *     graph are never torn down.  This avoids GC pressure and GPU upload
- *     overhead between slider ticks.
- *
- *  2. The VOX binary is parsed entirely in JS (no extra dependency).
- *
- *  3. OrbitControls are loaded from the Three.js addons CDN path so the
- *     HTML only needs one <script type="importmap"> entry.
+ * Draws a Grid (see grid.js) as chunked greedy meshes from mesher.js, in grid
+ * units: the model group is centred on X/Z with its bottom at Y = 0. Picks
+ * voxels from ray hits, and can overlay the source model as a translucent
+ * "ghost" to check the voxels line up with it.
  */
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { meshChunk, linearPalette } from './mesher.js';
 
-// ── VOX binary parser ─────────────────────────────────────────────────────────
-
-/**
- * parseVox(buffer)
- *
- * Returns { size, voxels, palette } where:
- *   size    = { x, y, z }
- *   voxels  = Uint8Array interleaved as [x,y,z,colorIdx, …]  (4 bytes per voxel)
- *   palette = Uint8Array, 256 × 4 bytes (RGBA), index 0 is unused
- */
-function parseVox(buffer) {
-    const dv   = new DataView(buffer);
-    const u32  = (n) => dv.getUint32(n, true);
-    const id4  = (n) => String.fromCharCode(
-        dv.getUint8(n), dv.getUint8(n+1), dv.getUint8(n+2), dv.getUint8(n+3));
-
-    // ── magic + version
-    if (id4(0) !== 'VOX ') throw new Error('Not a valid .vox file (bad magic).');
-    // version = u32(4)  — accepted but not checked
-
-    // encodeVox (voxelizer.cpp) always writes SIZE, XYZI and RGBA chunks.
-    const result = {
-        size:    { x: 1, y: 1, z: 1 },
-        voxels:  null,
-        palette: null,
-    };
-
-    // ── recursive chunk walker ──────────────────────────────────────────────
-    function walkChunks(offset, end) {
-        while (offset + 12 <= end) {
-            const chunkId      = id4(offset);
-            const contentBytes = u32(offset + 4);
-            const childBytes   = u32(offset + 8);
-            const dataStart    = offset + 12;
-            const dataEnd      = dataStart + contentBytes;
-            const chunkEnd     = dataEnd + childBytes;
-
-            switch (chunkId) {
-                case 'SIZE':
-                    result.size.x = u32(dataStart);
-                    result.size.y = u32(dataStart + 4);
-                    result.size.z = u32(dataStart + 8);
-                    break;
-
-                case 'XYZI': {
-                    const n       = u32(dataStart);
-                    result.voxels = new Uint8Array(buffer, dataStart + 4, n * 4);
-                    break;
-                }
-
-                case 'RGBA':
-                    result.palette = new Uint8Array(buffer, dataStart, 256 * 4);
-                    break;
-
-                case 'MAIN':
-                    // MAIN has no content, only children
-                    walkChunks(dataEnd, dataEnd + childBytes);
-                    break;
-
-                default:
-                    // Unknown chunk — skip silently
-                    break;
-            }
-            offset = chunkEnd;
-        }
-    }
-
-    walkChunks(8, buffer.byteLength);
-    return result;
-}
-
-// ── Three.js scene state ──────────────────────────────────────────────────────
-
-let renderer, scene, camera, controls;
-let instMesh  = null;     // current InstancedMesh
-let currentVoxels = null;
-let currentPalette = null;
-let paintMode = false;
-let paintColorIndex = 1; // 1-based palette index
-
+let renderer, scene, camera, controls, sun, helpers;
+let grid = null;
+let ghost = null;
+const model = new THREE.Group();   // grid space; chunk meshes and the ghost live here
+const chunks = new Map();          // chunk key → THREE.Mesh
 const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
-
-// Reusable dummy object to compute matrices
-const _dummy  = new THREE.Object3D();
-const _color  = new THREE.Color();
-const _boxGeo = new THREE.BoxGeometry();   // 1×1×1: one voxel per world unit
-
-let isLinesEnabled = false;
+const clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
+const view = { lines: false, ghost: false, clip: 1 };
 
 function createEdgeTexture() {
     const size = 64;
@@ -113,11 +27,9 @@ function createEdgeTexture() {
     canvas.height = size;
     const ctx = canvas.getContext('2d');
 
-    // Fill white (this part takes the full instanceColor)
+    // White (takes the full vertex colour) with dark borders.
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, size, size);
-
-    // Draw dark border edges
     ctx.lineWidth = 4;
     ctx.strokeStyle = '#222222';
     ctx.strokeRect(0, 0, size, size);
@@ -125,19 +37,17 @@ function createEdgeTexture() {
     const texture = new THREE.CanvasTexture(canvas);
     texture.magFilter = THREE.NearestFilter;
     texture.minFilter = THREE.NearestFilter;
+    texture.wrapS = texture.wrapT = THREE.RepeatWrapping;   // quad UVs are in voxel units
     texture.colorSpace = THREE.SRGBColorSpace;
     return texture;
 }
 
 const edgeTexture = createEdgeTexture();
-
-export function setBlockLines(enabled) {
-    isLinesEnabled = enabled;
-    if (instMesh) {
-        instMesh.material.map = isLinesEnabled ? edgeTexture : null;
-        instMesh.material.needsUpdate = true;
-    }
-}
+const voxelMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 });
+// X-ray overlay: drawn on top of the voxels so the source outline stays visible.
+const ghostMaterial = new THREE.MeshBasicMaterial({
+    color: 0x2f6fd0, transparent: true, opacity: 0.18, depthTest: false, depthWrite: false,
+});
 
 // ── Helper: Create text sprite ──────────────────────────────────────────────
 function createTextSprite(text) {
@@ -151,28 +61,28 @@ function createTextSprite(text) {
     ctx.fillStyle = '#8a9186'; // Similar to grid lines but slightly more legible
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    
+
     // Optional: add a pure white slight glow/stroke behind text for readability against lines
     ctx.shadowColor = '#f9f9f9';
     ctx.shadowBlur = 4;
     ctx.lineWidth = 4;
     ctx.strokeStyle = '#f9f9f9';
     ctx.strokeText(text, canvas.width / 2, canvas.height / 2 + 2);
-    
+
     ctx.shadowBlur = 0;
     ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 2);
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     const material = new THREE.SpriteMaterial({
-        map: texture, 
+        map: texture,
         depthTest: false,
         transparent: true,
         opacity: 0.8
     });
     const sprite = new THREE.Sprite(material);
     sprite.scale.set(24, 6, 1);
-    
+
     // Make it render on top
     sprite.renderOrder = 999;
     return sprite;
@@ -180,7 +90,7 @@ function createTextSprite(text) {
 
 // ── Initialise scene (called once) ───────────────────────────────────────────
 
-export async function initPreview(container) {
+export function initPreview(container) {
     // ── renderer
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -193,6 +103,7 @@ export async function initPreview(container) {
     // ── scene
     scene = new THREE.Scene();
     scene.background = new THREE.Color('#f5f5f7');
+    scene.add(model);
 
     // ── camera
     camera = new THREE.PerspectiveCamera(
@@ -207,21 +118,12 @@ export async function initPreview(container) {
     // Soft Hemisphere ambient + tuned Directional light for crisp, Goxel-style shadows
     const hemiLight = new THREE.HemisphereLight(0xffffff, 0x888888, 0.4);
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
-    
-    const sun = new THREE.DirectionalLight(0xffffff, 1.0);
-    sun.position.set(100, 150, 50);
+
+    sun = new THREE.DirectionalLight(0xffffff, 1.0);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    
-    // Shadow frustum tuned for voxel scales
-    const d = 120;
-    sun.shadow.camera.left = -d;
-    sun.shadow.camera.right = d;
-    sun.shadow.camera.top = d;
-    sun.shadow.camera.bottom = -d;
-    sun.shadow.camera.near = 1;
-    sun.shadow.camera.far = 400;
     sun.shadow.bias = -0.001; // Prevent shadow acne on voxel surfaces
+    fitLight(1);
 
     scene.add(hemiLight, ambientLight, sun);
 
@@ -230,129 +132,24 @@ export async function initPreview(container) {
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
 
-    // ── paint interactions
-    let isDragging = false;
-    let hasMoved = false;
-
-    container.addEventListener('pointerdown', (e) => {
-        if (!paintMode || !instMesh) return;
-        isDragging = true;
-        hasMoved = false;
-    });
-
-    // Any movement while pressed is a camera drag, not a paint click.
-    container.addEventListener('pointermove', () => {
-        if (isDragging) hasMoved = true;
-    });
-
-    container.addEventListener('pointerup', (e) => {
-        if (!paintMode || !instMesh || !isDragging) return;
-        isDragging = false;
-        
-        // If the user was just dragging the camera, don't paint
-        if (hasMoved) return;
-
-        const rect = container.getBoundingClientRect();
-        mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-
-        raycaster.setFromCamera(mouse, camera);
-        const intersects = raycaster.intersectObject(instMesh);
-
-        if (intersects.length > 0) {
-            const startInstanceId = intersects[0].instanceId;
-            if (startInstanceId !== undefined && currentVoxels) {
-                const targetColorIndex = currentVoxels[startInstanceId * 4 + 3];
-                // If the clicked voxel is already the active color, do nothing
-                if (targetColorIndex === paintColorIndex) return;
-
-                // 1. Build a spatial map for O(1) adjacency lookup
-                const numVoxels = currentVoxels.length / 4;
-                const voxelMap = new Map();
-                for (let i = 0; i < numVoxels; i++) {
-                    const x = currentVoxels[i * 4 + 0];
-                    const y = currentVoxels[i * 4 + 1];
-                    const z = currentVoxels[i * 4 + 2];
-                    voxelMap.set((x << 16) | (y << 8) | z, i);
-                }
-
-                const dirs = [
-                    [1,0,0], [-1,0,0],
-                    [0,1,0], [0,-1,0],
-                    [0,0,1], [0,0,-1]
-                ];
-
-                const pi = Math.max(0, (paintColorIndex - 1)) * 4;
-                _color.setRGB(
-                    currentPalette[pi]   / 255,
-                    currentPalette[pi+1] / 255,
-                    currentPalette[pi+2] / 255,
-                    THREE.SRGBColorSpace
-                );
-
-                // 2. Flood fill (BFS) connected voxels of the target color.
-                //    Voxels are painted as they are queued; the paint colour
-                //    differs from the target, so the colour check alone keeps
-                //    a voxel from being queued twice.
-                const queue = [];
-                const paint = (id) => {
-                    currentVoxels[id * 4 + 3] = paintColorIndex;
-                    instMesh.setColorAt(id, _color);
-                    queue.push(id);
-                };
-                paint(startInstanceId);
-
-                while (queue.length > 0) {
-                    const currId = queue.shift();
-
-                    const cx = currentVoxels[currId * 4 + 0];
-                    const cy = currentVoxels[currId * 4 + 1];
-                    const cz = currentVoxels[currId * 4 + 2];
-
-                    for (const [dx, dy, dz] of dirs) {
-                        const nx = cx + dx;
-                        const ny = cy + dy;
-                        const nz = cz + dz;
-                        
-                        // Bounds check
-                        if (nx >= 0 && nx <= 255 && ny >= 0 && ny <= 255 && nz >= 0 && nz <= 255) {
-                            const key = (nx << 16) | (ny << 8) | nz;
-                            const neighborId = voxelMap.get(key);
-
-                            if (neighborId !== undefined && currentVoxels[neighborId * 4 + 3] === targetColorIndex) {
-                                paint(neighborId);
-                            }
-                        }
-                    }
-                }
-
-                instMesh.instanceColor.needsUpdate = true;
-            }
-        }
-    });
-
-    // ── grid helper (subtle floor reference — light mode)
-    const grid = new THREE.GridHelper(200, 40, 0xbbbbbb, 0xd8d8d8);
-    scene.add(grid);
-
-    // ── invisible shadow-catching floor plane
-    const floorGeo = new THREE.PlaneGeometry(500, 500);
-    const floorMat = new THREE.ShadowMaterial({ opacity: 0.15 });
-    const floor = new THREE.Mesh(floorGeo, floorMat);
-    floor.rotation.x = -Math.PI / 2;
-    // slightly below the 0 level so it doesn't z-fight with grid or lowest voxels
-    floor.position.y = -0.01; 
-    floor.receiveShadow = true;
-    scene.add(floor);
-
-    // Add Axes Helper and Labels
-    scene.add(new THREE.AxesHelper(100)); // Shows Origin
-
+    // ── floor helpers (scaled with the model in frame())
+    helpers = new THREE.Group();
+    helpers.add(new THREE.GridHelper(200, 40, 0xbbbbbb, 0xd8d8d8));
+    helpers.add(new THREE.AxesHelper(100)); // Shows Origin
     for (const [text, x, z] of [['X', 110, 0], ['Z', 0, 110], ['-X', -110, 0], ['-Z', 0, -110]]) {
         const label = createTextSprite(text);
         label.position.set(x, 0, z);
-        scene.add(label);
+        helpers.add(label);
     }
+    scene.add(helpers);
+
+    // ── invisible shadow-catching floor plane
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), new THREE.ShadowMaterial({ opacity: 0.15 }));
+    floor.rotation.x = -Math.PI / 2;
+    // slightly below the 0 level so it doesn't z-fight with grid or lowest voxels
+    floor.position.y = -0.01;
+    floor.receiveShadow = true;
+    scene.add(floor);
 
     // ── resize observer
     const ro = new ResizeObserver(() => {
@@ -370,123 +167,137 @@ export async function initPreview(container) {
     });
 }
 
-// ── Update InstancedMesh with new VOX data ───────────────────────────────────
+// Sun and shadow frustum sized for a model `s` times the default 128 voxels.
+function fitLight(s) {
+    sun.position.set(100 * s, 150 * s, 50 * s);
+    const cam = sun.shadow.camera, d = 120 * s;
+    Object.assign(cam, { left: -d, right: d, top: d, bottom: -d, near: 1, far: 400 * s });
+    cam.updateProjectionMatrix();
+}
+
+function frame() {
+    const { sx, sy, sz } = grid;
+    const s = Math.max(1, Math.max(sx, sy, sz) / 128);
+    helpers.scale.setScalar(s);
+    fitLight(s);
+    const r = 0.5 * Math.hypot(sx, sy, sz);
+    const dist = r * 2.5;
+    controls.target.set(0, sy / 2, 0);
+    camera.position.set(dist, dist * 0.7 + sy / 2, dist);
+    controls.update();
+}
+
+function addChunk(key, b) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(b.positions, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(b.normals, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(b.colors, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(b.uvs, 2));
+    geo.setIndex(new THREE.BufferAttribute(b.indices, 1));
+    const mesh = new THREE.Mesh(geo, voxelMaterial);
+    mesh.castShadow = mesh.receiveShadow = true;
+    chunks.set(key, mesh);
+    model.add(mesh);
+}
+
+function removeChunk(key) {
+    const mesh = chunks.get(key);
+    if (!mesh) return;
+    model.remove(mesh);
+    mesh.geometry.dispose();
+    chunks.delete(key);
+}
+
+/** Show a new grid. `meshes` is Map(chunk key → mesher output) for it. */
+export function setGrid(g, meshes, { reframe = false } = {}) {
+    grid = g;
+    for (const key of [...chunks.keys()]) removeChunk(key);
+    for (const [key, b] of meshes) addChunk(key, b);
+    model.position.set(-g.sx / 2, 0, -g.sz / 2);
+    applyView();
+    if (reframe) frame();
+}
+
+/** Re-mesh chunks after edits to the current grid. */
+export function remesh(keys) {
+    const linear = linearPalette(grid.palette);
+    for (const key of keys) {
+        removeChunk(key);
+        const [cx, cy, cz] = key.split(',').map(Number);
+        const b = meshChunk(grid, cx, cy, cz, { linear });
+        if (b) addChunk(key, b);
+    }
+}
 
 /**
- * updatePreview(voxBuffer)
- *
- * Called from main.js whenever the worker returns a new VOX ArrayBuffer.
- * Parses the binary, then:
- *   • If the voxel count grew since the last update, rebuild the mesh (and
- *     reframe the camera).
- *   • Otherwise only patch the existing InstancedMesh buffers.
+ * Overlay the source model: `object` is in model space, mapped to grid space
+ * by the voxelizer's `origin` and `cell` size. Pass null to clear.
  */
-export async function updatePreview(voxBuffer) {
-    // Parse the original buffer so that we can directly modify it when painting
-    const { size, voxels, palette } = parseVox(voxBuffer);
-
-    // Keep reference to current voxels and palette for painting
-    currentVoxels = voxels;
-    currentPalette = palette;
-
-    if (!voxels || voxels.length === 0) {
-        // Nothing to render — hide existing mesh
-        if (instMesh) instMesh.visible = false;
-        return;
-    }
-
-    const count = voxels.length / 4;   // 4 bytes per voxel entry
-
-    // ── (Re)create InstancedMesh when the count outgrows the last update's ────
-    //  (instMesh.count never exceeds the capacity, so that's the only check.)
-    const needRebuild = !instMesh || count > instMesh.count;
-
-    if (needRebuild) {
-        if (instMesh) {
-            scene.remove(instMesh);
-            instMesh.dispose();
-        }
-
-        // Use an un-shiny standard material for solid, clay-like voxel appearance
-        const mat = new THREE.MeshStandardMaterial({
-            map: isLinesEnabled ? edgeTexture : null,
-            color: 0xffffff,
-            roughness: 0.9,
-            metalness: 0.0
-        });
-
-        instMesh = new THREE.InstancedMesh(_boxGeo, mat, count);
-        instMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        // Enable soft self-shadowing (acne prevented by sun bias)
-        instMesh.castShadow    = true;
-        instMesh.receiveShadow = true;
-        scene.add(instMesh);
-    }
-
-    // ── Half-extents used to centre the mesh at world origin ─────────────────
-    const cx = size.x / 2;
-    const cy = size.z / 2;   // VOX Z → Three world Y
-    const cz = size.y / 2;
-
-    // ── Batch-write matrices + colours ───────────────────────────────────────
-    for (let i = 0; i < count; i++) {
-        const vx  = voxels[i*4 + 0];
-        const vy  = voxels[i*4 + 1];
-        const vz  = voxels[i*4 + 2];
-        const ci  = voxels[i*4 + 3];   // 1-based palette index
-
-        // VOX axes: X right, Y forward, Z up → Three.js Y up convention.
-        // Raw positions only — the mesh.position offset centres everything.
-        _dummy.position.set(vx, vz, vy);
-        _dummy.updateMatrix();
-        instMesh.setMatrixAt(i, _dummy.matrix);
-
-        // Palette lookup (index 0 = unused, so shift by 1 in VOX spec)
-        // convertSRGBToLinear: palette bytes are sRGB; Three.js works in
-        // linear space internally, so convert to avoid crushed/black colours.
-        const pi = Math.max(0, (ci - 1)) * 4;
-        _color.setRGB(
-            palette[pi]   / 255,
-            palette[pi+1] / 255,
-            palette[pi+2] / 255,
-            THREE.SRGBColorSpace
-        );
-        instMesh.setColorAt(i, _color);
-    }
-
-    // Centre the mesh on X/Z but keep the bottom at Y = 0
-    instMesh.position.set(-cx, 0, -cz);
-
-    // ── Tell Three.js the buffers changed ─────────────────────────────────────
-    //  IMPORTANT: only the first `count` entries are valid; set .count so the
-    //  renderer skips drawing unset tail instances from a previous larger mesh.
-    instMesh.count                    = count;
-    instMesh.instanceMatrix.needsUpdate = true;
-    instMesh.instanceColor.needsUpdate = true;   // setColorAt above created it
-    instMesh.visible                  = true;
-    instMesh.computeBoundingSphere();
-
-    // ── Smoothly reframe the camera on first load ─────────────────────────────
-    if (needRebuild) {
-        const r = instMesh.boundingSphere?.radius ?? 50;
-        // Model bottom is at 0, target the Y midpoint (cy)
-        controls.target.set(0, cy, 0);
-        const dist = r * 2.5;
-        camera.position.set(dist, (dist * 0.7) + cy, dist);
-        controls.update();
-    }
-
-    // Return metadata so the caller can update UI stats.
-    return { voxCount: count, sizeX: size.x, sizeY: size.y, sizeZ: size.z };
+export function setGhost(object, origin, cell) {
+    if (ghost) model.remove(ghost);
+    ghost = null;
+    if (!object) return;
+    object.traverse((o) => {
+        if (o.isMesh) { o.material = ghostMaterial; o.castShadow = o.receiveShadow = false; }
+    });
+    ghost = new THREE.Group();
+    ghost.add(object);
+    ghost.scale.setScalar(1 / cell);
+    ghost.position.set(-origin[0] / cell, -origin[1] / cell, -origin[2] / cell);
+    model.add(ghost);
+    applyView();
 }
 
-export function setPaintMode(active) {
-    paintMode = active;
-    if (renderer && renderer.domElement) {
-        renderer.domElement.style.cursor = active ? 'crosshair' : 'default';
-    }
+/** { lines, ghost, clip } — clip is the visible fraction of the model height (1 = no clipping). */
+export function setView(opts) {
+    Object.assign(view, opts);
+    applyView();
 }
 
-export function setPaintColor(index) {
-    paintColorIndex = index;
+function applyView() {
+    voxelMaterial.map = view.lines ? edgeTexture : null;
+    voxelMaterial.needsUpdate = true;
+    if (ghost) ghost.visible = view.ghost;
+    clipPlane.constant = grid ? view.clip * grid.sy : 0;
+    renderer.clippingPlanes = grid && view.clip < 1 ? [clipPlane] : [];
+}
+
+/** Voxel under a screen point: { voxel: [x, y, z], normal: [nx, ny, nz] } or null. */
+export function pick(clientX, clientY) {
+    if (!grid) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    // Matrices normally refresh when a frame renders; a new grid may not have rendered yet.
+    model.updateMatrixWorld(true);
+    raycaster.setFromCamera(ndc, camera);
+    const clipY = view.clip < 1 ? view.clip * grid.sy : Infinity;
+    const hit = raycaster.intersectObjects([...chunks.values()], false).find((h) => h.point.y <= clipY + 1e-3);
+    if (!hit) return null;
+    const n = hit.face.normal;   // chunk meshes are only translated, so this is grid space
+    const p = model.worldToLocal(hit.point.clone());
+    return { voxel: [p.x - n.x / 2, p.y - n.y / 2, p.z - n.z / 2].map(Math.floor), normal: [n.x, n.y, n.z] };
+}
+
+export const canvas = () => renderer.domElement;
+
+/** While an edit tool is active, left-drag edits and right-drag orbits (instead of panning). */
+export function setToolMode(active) {
+    controls.mouseButtons.LEFT = active ? null : THREE.MOUSE.ROTATE;
+    controls.mouseButtons.RIGHT = active ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+    renderer.domElement.style.cursor = active ? 'crosshair' : '';
+}
+
+const boxLines = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+    new THREE.LineBasicMaterial({ color: 0x476643, depthTest: false }),
+);
+boxLines.renderOrder = 998;
+
+/** Outline the box between two voxel corners (inclusive), or hide it with null. */
+export function showBox(a, b) {
+    if (!a) { model.remove(boxLines); return; }
+    const lo = a.map((v, i) => Math.min(v, b[i])), hi = a.map((v, i) => Math.max(v, b[i]) + 1);
+    boxLines.scale.set(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+    boxLines.position.set((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2);
+    model.add(boxLines);
 }

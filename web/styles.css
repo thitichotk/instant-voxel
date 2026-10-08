@@ -390,6 +390,153 @@
       color: var(--on-secondary-container);
     }
 
+    /* ── Form fields ─────────────────────────────────────────────────── */
+    [hidden] { display: none !important; }
+    .card-label-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .toggle-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+    .field {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      font-size: 0.75rem;
+      color: var(--on-surface-variant);
+    }
+    .field select,
+    .field input[type="number"] {
+      font: inherit;
+      font-weight: 600;
+      color: var(--on-surface);
+      background: var(--surface);
+      border: none;
+      border-radius: var(--radius-full);
+      padding: 0.3rem 0.75rem;
+      min-width: 0;
+      outline: none;
+    }
+    .field select { cursor: pointer; max-width: 9.5rem; }
+    .field input[type="number"] { width: 5.5rem; text-align: right; }
+    .field input[type="url"],
+    .field input[type="password"] {
+      font: inherit;
+      font-weight: 600;
+      color: var(--on-surface);
+      background: var(--surface);
+      border: none;
+      border-radius: var(--radius-full);
+      padding: 0.3rem 0.75rem;
+      width: 9.5rem;
+      outline: none;
+    }
+    #ai-prompt {
+      width: 100%;
+      font: inherit;
+      font-size: 0.75rem;
+      color: var(--on-surface);
+      background: var(--surface);
+      border: none;
+      border-radius: var(--radius-md, 1rem);
+      padding: 0.6rem 0.8rem;
+      resize: vertical;
+      outline: none;
+    }
+    .ai-health, .ai-note {
+      font-size: 0.65rem;
+      font-weight: 600;
+      color: var(--on-surface-variant);
+    }
+    .ai-health.ok { color: var(--primary); }
+    .ai-health.error { color: #d9534f; }
+    .field select:focus-visible,
+    .field input[type="number"]:focus-visible { box-shadow: 0 0 0 2px rgba(71, 102, 67, 0.2); }
+    .segmented {
+      display: inline-flex;
+      background: var(--surface);
+      border-radius: var(--radius-full);
+      padding: 2px;
+    }
+    .segmented label {
+      padding: 0.2rem 0.7rem;
+      border-radius: var(--radius-full);
+      cursor: pointer;
+      font-weight: 700;
+      color: var(--on-surface-variant);
+    }
+    .segmented input { display: none; }
+    .segmented label:has(input:checked) {
+      background: var(--secondary-container);
+      color: var(--on-secondary-container);
+    }
+
+    /* ── Edit tools ──────────────────────────────────────────────────── */
+    .tool-grid {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 0.25rem;
+    }
+    .tool-grid label {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 2rem;
+      border-radius: var(--radius-full);
+      background: var(--surface);
+      color: var(--on-surface-variant);
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .tool-grid label:hover { background: var(--surface-high); }
+    .tool-grid input { display: none; }
+    .tool-grid label:has(input:checked) {
+      background: var(--secondary-container);
+      color: var(--on-secondary-container);
+    }
+    .tool-grid .material-symbols-outlined { font-size: 18px; }
+    .icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.9rem;
+      height: 1.9rem;
+      border: none;
+      border-radius: var(--radius-full);
+      background: var(--surface);
+      color: var(--primary);
+      cursor: pointer;
+    }
+    .icon-btn:disabled { opacity: 0.38; cursor: not-allowed; }
+    .icon-btn .material-symbols-outlined { font-size: 18px; }
+
+    /* ── Drop-anywhere overlay ───────────────────────────────────────── */
+    #drop-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(165, 200, 158, 0.25);
+      backdrop-filter: blur(4px);
+      pointer-events: none;
+    }
+    body.dragging #drop-overlay { display: flex; }
+    .drop-overlay-card {
+      background: var(--surface-lowest);
+      box-shadow: var(--shadow-ambient);
+      border-radius: var(--radius-full);
+      padding: 1rem 2rem;
+      font-weight: 800;
+      color: var(--primary);
+    }
+
     /* ── Resolution slider ───────────────────────────────────────────── */
     .slider-header {
       display: flex;

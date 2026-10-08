@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>VOXY — GLB to VOX</title>
-  <meta name="description" content="Convert GLB 3D models to MagicaVoxel .vox format with palette support." />
+  <title>VOXY — 3D to voxels</title>
+  <meta name="description" content="Turn 3D models into voxel art: MagicaVoxel .vox, meshes and more, right in the browser." />
 
   <script type="importmap">
   {
@@ -37,8 +37,8 @@
   <!-- Hint overlay shown before a model is loaded -->
   <div id="hint-overlay">
     <div class="hint-glyph">⬡</div>
-    <div class="hint-title">Load a GLB model</div>
-    <div class="hint-sub">Drag a file onto the panel or click to browse</div>
+    <div class="hint-title">Load a 3D model</div>
+    <div class="hint-sub">Drop files anywhere, or pick them in the Source panel</div>
   </div>
 
   <!-- Viewport Rotation Gizmos -->
@@ -52,110 +52,302 @@
   </div>
 </div>
 
+<!-- Shown while files are dragged over the window -->
+<div id="drop-overlay"><div class="drop-overlay-card">Drop to open</div></div>
+
 <!-- ══════════════════════ EDITOR UI OVERLAYS ═══════════════════ -->
 <div id="editor-ui">
 
-  <!-- Left Sidebar: Inputs & Tools -->
+  <!-- Left Sidebar: Inputs -->
   <aside class="editor-panel" id="panel-left">
-    <!-- Top Log / Header -->
     <header class="panel-header">
-      <div class="panel-eyebrow">Conversion Settings</div>
+      <div class="panel-eyebrow">Voxel Studio</div>
       <div class="panel-title">VOXY<span>.</span></div>
-      <div class="panel-subtitle">GLB → MagicaVoxel .vox</div>
+      <div class="panel-subtitle">Models &amp; images → voxels</div>
     </header>
 
-    <!-- Model input -->
+    <!-- Source -->
     <div class="card">
-      <div class="card-label">3D Model</div>
-      <div class="drop-zone" id="drop-zone" title="Click or drag a .glb file">
-        <input type="file" id="input-glb" accept=".glb" aria-label="Choose GLB file" />
+      <div class="card-label">Source</div>
+      <div class="drop-zone" id="drop-zone-model" title="Click or drop model files">
+        <input type="file" id="input-model" multiple
+               accept=".glb,.gltf,.bin,.obj,.mtl,.fbx,.stl,.ply,.3mf,.dae,.vox,.png,.jpg,.jpeg,.webp,.gif,.bmp"
+               aria-label="Choose model files" />
         <div class="drop-icon-wrap">
           <span class="material-symbols-outlined">upload_file</span>
         </div>
         <div class="drop-info">
-          <div class="drop-name" id="drop-name">Choose .glb file</div>
-          <div class="drop-hint">GLB only · drag &amp; drop supported</div>
+          <div class="drop-name" id="drop-name-model">Choose model files</div>
+          <div class="drop-hint">GLB · glTF · OBJ · FBX · STL · PLY · 3MF · DAE · VOX · PNG · JPG</div>
         </div>
       </div>
     </div>
 
-    <!-- Palette input & Paint tool -->
+    <!-- Generate (AI) -->
     <div class="card">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div class="card-label">Colour Palette</div>
-        <label class="toggle-paint">
-          <input type="checkbox" id="toggle-paint" aria-label="Toggle paint tool">
-          <span class="material-symbols-outlined" style="font-size: 16px;">format_paint</span>
-          Paint
+      <div class="card-label">Generate</div>
+      <div class="field">
+        <label for="ai-provider">With</label>
+        <select id="ai-provider">
+          <option value="server">Model server · 3D</option>
+          <option value="browser">In-browser · relief</option>
+        </select>
+      </div>
+      <div id="ai-server-fields">
+        <div class="field">
+          <label for="ai-url">Server</label>
+          <input type="url" id="ai-url" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="ai-key">API key</label>
+          <input type="password" id="ai-key" placeholder="optional" autocomplete="off" />
+        </div>
+        <div class="ai-health" id="ai-health">Not checked</div>
+        <textarea id="ai-prompt" rows="2" maxlength="500" placeholder="Describe one object, e.g. a red toy robot"></textarea>
+      </div>
+      <div class="drop-zone" id="drop-zone-ai" title="Click to choose a photo">
+        <input type="file" id="input-ai" accept="image/png,image/jpeg,image/webp" aria-label="Choose a photo" />
+        <div class="drop-icon-wrap">
+          <span class="material-symbols-outlined">photo_camera</span>
+        </div>
+        <div class="drop-info">
+          <div class="drop-name" id="drop-name-ai">Choose a photo</div>
+          <div class="drop-hint" id="drop-hint-ai">Optional with a prompt</div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" id="btn-generate">
+          <span class="material-symbols-outlined" style="font-size:18px;">auto_awesome</span>
+          Generate
+        </button>
+      </div>
+      <div class="ai-note" id="ai-note">3D by Stable Fast 3D · Powered by Stability AI</div>
+    </div>
+
+    <!-- Voxelise -->
+    <div class="card">
+      <div class="card-label">Voxelise</div>
+      <div class="slider-header">
+        <span class="slider-desc">Size (voxels)</span>
+        <span class="slider-badge" id="size-value">64</span>
+      </div>
+      <div class="slider-wrap">
+        <input type="range" id="size" min="8" max="512" step="1" value="64" aria-label="Size in voxels" />
+      </div>
+      <div id="model-fields">
+      <div class="field">
+        <label for="axis">Size along</label>
+        <select id="axis">
+          <option value="-1">Longest axis</option>
+          <option value="0">X (width)</option>
+          <option value="1">Y (height)</option>
+          <option value="2">Z (depth)</option>
+        </select>
+      </div>
+      <div class="field">
+        <span>Fill</span>
+        <div class="segmented" role="radiogroup" aria-label="Fill">
+          <label><input type="radio" name="fill" value="surface">Surface</label>
+          <label><input type="radio" name="fill" value="solid">Solid</label>
+        </div>
+      </div>
+      <div class="field" id="field-hollow">
+        <label for="hollow">Hollow shell (0 = off)</label>
+        <input type="number" id="hollow" min="0" max="64" step="1" />
+      </div>
+      <div class="field">
+        <label for="islands">Drop islands under</label>
+        <input type="number" id="islands" min="0" max="1000000" step="1" title="Voxels; 0 keeps everything" />
+      </div>
+      </div>
+      <div id="image-fields" hidden>
+        <div class="field">
+          <label for="image-mode">Image as</label>
+          <select id="image-mode">
+            <option value="pixel">Pixel art</option>
+            <option value="height">Heightmap</option>
+            <option value="photo">Photo relief (AI)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="depth">Depth (voxels)</label>
+          <input type="number" id="depth" min="1" max="256" step="1" />
+        </div>
+        <div class="field" id="field-background">
+          <label for="background">Background</label>
+          <select id="background">
+            <option value="depth">Cut by depth</option>
+            <option value="keep">Keep</option>
+            <option value="mask">AI mask (115 MB)</option>
+          </select>
+        </div>
+        <label class="toggle-paint" id="field-mirror">
+          <input type="checkbox" id="mirror" aria-label="Mirror the relief to the back">
+          <span class="material-symbols-outlined" style="font-size: 16px;">flip</span>
+          Mirror back
         </label>
       </div>
-      
-      <div class="drop-zone" id="drop-zone-pal" title="Click or drag a .hex file">
+    </div>
+
+    <!-- Colour -->
+    <div class="card">
+      <div class="card-label">Colour</div>
+      <div class="field">
+        <label for="palette-mode">Palette</label>
+        <select id="palette-mode">
+          <option value="auto">Auto (from model)</option>
+          <option value="cube">Default cube</option>
+          <option value="minecraft">Minecraft blocks</option>
+          <option value="hex">Custom .hex</option>
+        </select>
+      </div>
+      <div id="field-colors">
+        <div class="slider-header">
+          <span class="slider-desc">Colours</span>
+          <span class="slider-badge" id="colors-value">255</span>
+        </div>
+        <div class="slider-wrap">
+          <input type="range" id="colors" min="2" max="255" step="1" value="255" aria-label="Number of colours" />
+        </div>
+      </div>
+      <div class="drop-zone" id="drop-zone-pal" title="Click or drop a .hex file">
         <input type="file" id="input-pal" accept=".hex" aria-label="Choose HEX palette file" />
         <div class="drop-icon-wrap">
           <span class="material-symbols-outlined">palette</span>
         </div>
         <div class="drop-info">
           <div class="drop-name" id="drop-name-pal">Choose .hex file</div>
-          <div class="drop-hint">Local palette file</div>
+          <div class="drop-hint">One colour per line</div>
         </div>
       </div>
-      
-      <div id="palette-swatches" aria-label="Palette preview"></div>
-      <div id="palette-name"></div>
+      <label class="toggle-paint">
+        <input type="checkbox" id="dither" aria-label="Dither">
+        <span class="material-symbols-outlined" style="font-size: 16px;">blur_on</span>
+        Dither
+      </label>
+      <div id="palette-swatches" aria-label="Palette"></div>
     </div>
   </aside>
 
-  <!-- Right Sidebar: Settings & Actions -->
+  <!-- Right Sidebar: Run, View & Export -->
   <aside class="editor-panel" id="panel-right">
-    <!-- Resolution slider -->
-    <div class="card">
-      <div class="card-label">Voxel Resolution</div>
-      <div class="slider-header">
-        <span class="slider-desc">Grid size — longest axis</span>
-        <span class="slider-badge" id="slider-value">32</span>
-      </div>
-      <div class="slider-wrap">
-        <input
-          type="range"
-          id="slider-grid"
-          min="8" max="256" step="1" value="32"
-          aria-label="Voxel grid resolution"
-          style="--pct: 11%"
-        />
-      </div>
-      <div class="slider-ticks">
-        <span>8</span>
-        <span>64</span>
-        <span>128</span>
-        <span>192</span>
-        <span>256</span>
-      </div>
-      <div style="margin-top: 1rem; display: flex; justify-content: flex-end;">
-        <label class="toggle-paint">
-          <input type="checkbox" id="toggle-lines" aria-label="Toggle block lines">
-          <span class="material-symbols-outlined" style="font-size: 16px;">grid_4x4</span>
-          Show Lines
-        </label>
-      </div>
-    </div>
-
-    <!-- Progress, status & Actions -->
+    <!-- Progress, status & run -->
     <div class="card">
       <div class="progress-track"><div id="progress-fill"></div></div>
       <div class="status-row">
         <div class="status-dot" id="status-dot"></div>
         <span id="status-text">Initialising Wasm module…</span>
       </div>
-
       <div class="actions">
         <button class="btn btn-primary" id="btn-convert" disabled>
           <span class="material-symbols-outlined" style="font-size:18px;">auto_awesome</span>
           Voxelise
         </button>
+        <button class="btn btn-secondary" id="btn-cancel" hidden>
+          <span class="material-symbols-outlined" style="font-size:18px;">close</span>
+          Cancel
+        </button>
+      </div>
+    </div>
+
+    <!-- Edit -->
+    <div class="card">
+      <div class="card-label-row">
+        <div class="card-label">Edit</div>
+        <div class="toggle-row">
+          <button class="icon-btn" id="btn-undo" title="Undo (⌘Z)" disabled>
+            <span class="material-symbols-outlined">undo</span>
+          </button>
+          <button class="icon-btn" id="btn-redo" title="Redo (⇧⌘Z)" disabled>
+            <span class="material-symbols-outlined">redo</span>
+          </button>
+        </div>
+      </div>
+      <div class="tool-grid" role="radiogroup" aria-label="Tool">
+        <label title="Orbit (O)"><input type="radio" name="tool" value="orbit"><span class="material-symbols-outlined">3d_rotation</span></label>
+        <label title="Paint (B)"><input type="radio" name="tool" value="paint"><span class="material-symbols-outlined">brush</span></label>
+        <label title="Erase (E)"><input type="radio" name="tool" value="erase"><span class="material-symbols-outlined">ink_eraser</span></label>
+        <label title="Add (A)"><input type="radio" name="tool" value="add"><span class="material-symbols-outlined">add_box</span></label>
+        <label title="Fill region (F)"><input type="radio" name="tool" value="fill"><span class="material-symbols-outlined">format_color_fill</span></label>
+        <label title="Pick colour (I)"><input type="radio" name="tool" value="pick"><span class="material-symbols-outlined">colorize</span></label>
+        <label title="Box (X)"><input type="radio" name="tool" value="box"><span class="material-symbols-outlined">select</span></label>
+      </div>
+      <div id="field-brush">
+        <div class="slider-header">
+          <span class="slider-desc">Brush size</span>
+          <span class="slider-badge" id="brush-value">1</span>
+        </div>
+        <div class="slider-wrap">
+          <input type="range" id="brush" min="1" max="8" step="1" value="1" aria-label="Brush size" />
+        </div>
+      </div>
+      <div class="field" id="field-box-op">
+        <span>Box</span>
+        <div class="segmented" role="radiogroup" aria-label="Box action">
+          <label><input type="radio" name="box-op" value="fill">Fill</label>
+          <label><input type="radio" name="box-op" value="paint">Paint</label>
+          <label><input type="radio" name="box-op" value="erase">Erase</label>
+        </div>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle-paint">
+          <input type="checkbox" id="mirror-x" aria-label="Mirror edits across X">
+          <span class="material-symbols-outlined" style="font-size: 16px;">flip</span>
+          Mirror X
+        </label>
+        <label class="toggle-paint">
+          <input type="checkbox" id="mirror-z" aria-label="Mirror edits across Z">
+          <span class="material-symbols-outlined" style="font-size: 16px;">flip</span>
+          Mirror Z
+        </label>
+      </div>
+    </div>
+
+    <!-- View -->
+    <div class="card">
+      <div class="card-label">View</div>
+      <div class="toggle-row">
+        <label class="toggle-paint">
+          <input type="checkbox" id="toggle-lines" aria-label="Toggle block lines">
+          <span class="material-symbols-outlined" style="font-size: 16px;">grid_4x4</span>
+          Lines
+        </label>
+        <label class="toggle-paint">
+          <input type="checkbox" id="toggle-ghost" aria-label="Show the source model">
+          <span class="material-symbols-outlined" style="font-size: 16px;">deployed_code</span>
+          Ghost
+        </label>
+      </div>
+      <div class="slider-header">
+        <span class="slider-desc">Cut height</span>
+        <span class="slider-badge" id="clip-value">100%</span>
+      </div>
+      <div class="slider-wrap">
+        <input type="range" id="clip" min="0" max="100" step="1" value="100" aria-label="Cut height" />
+      </div>
+    </div>
+
+    <!-- Export -->
+    <div class="card">
+      <div class="card-label">Export</div>
+      <div class="field">
+        <label for="export-format">Format</label>
+        <select id="export-format">
+          <option value="vox">.vox · MagicaVoxel</option>
+          <option value="glb">.glb · game engines</option>
+          <option value="obj">.obj · Blender</option>
+          <option value="stl">.stl · 3D print</option>
+          <option value="schem">.schem · Minecraft</option>
+        </select>
+      </div>
+      <div class="field" id="field-voxel-mm">
+        <label for="voxel-mm">Voxel size (mm)</label>
+        <input type="number" id="voxel-mm" min="0.01" step="0.5" />
+      </div>
+      <div class="actions">
         <button class="btn btn-secondary" id="btn-download" disabled>
           <span class="material-symbols-outlined" style="font-size:18px;">download</span>
-          Download .vox
+          <span id="download-label">Download .vox</span>
         </button>
       </div>
     </div>
@@ -164,24 +356,24 @@
   <!-- Bottom Center: Horizontal Quick Stats -->
   <div class="editor-panel" id="panel-bottom-center">
     <div class="quick-stats-bar">
-      <div class="qs-item qs-highlight" id="export-highlight">
-        <span class="material-symbols-outlined qs-icon">inventory</span>
-        <div class="qs-text">
-          <div class="qs-label">File Size</div>
-          <div class="qs-val" id="stat-bytes">—</div>
-        </div>
-      </div>
-      <div class="qs-item">
+      <div class="qs-item qs-highlight">
+        <span class="material-symbols-outlined qs-icon">view_in_ar</span>
         <div class="qs-text">
           <div class="qs-label">Voxels</div>
           <div class="qs-val" id="stat-count">—</div>
         </div>
       </div>
-      <div class="qs-divider"></div>
       <div class="qs-item">
         <div class="qs-text">
           <div class="qs-label">Dimensions</div>
           <div class="qs-val" id="stat-size">—</div>
+        </div>
+      </div>
+      <div class="qs-divider"></div>
+      <div class="qs-item">
+        <div class="qs-text">
+          <div class="qs-label">Colours</div>
+          <div class="qs-val" id="stat-colors">—</div>
         </div>
       </div>
     </div>
@@ -190,7 +382,7 @@
   <!-- Bottom Left: Footer -->
   <div class="editor-panel" id="panel-bottom-fixed">
     <footer class="panel-footer">
-      <span class="footer-text">Emscripten · Three.js · tinygltf</span>
+      <span class="footer-text">Emscripten · Three.js</span>
       <span class="footer-badge">WASM</span>
     </footer>
   </div>

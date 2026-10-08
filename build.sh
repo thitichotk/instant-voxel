@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# build.sh — Emscripten build script for the GLB/GLTF → VOX converter
+# build.sh — Emscripten build script for the voxel kernel (src/voxelizer.cpp)
 #
 # Prerequisites:
 #   • Emscripten SDK activated in the current shell:
 #       source /path/to/emsdk/emsdk_env.sh
 #   • emcc >= 3.1.x
-#   • tiny_gltf.h placed at src/tiny_gltf.h
-#       https://github.com/syoyo/tinygltf/blob/master/tiny_gltf.h
 #
 # Usage:
 #   chmod +x build.sh
@@ -24,11 +22,6 @@ COMMON=(
     -std=c++17
     -O3
 
-    # ── Include paths ─────────────────────────────────────────────────────────
-    # Allows voxelizer.cpp to resolve:
-    #   #include "tiny_gltf.h"   →  src/tiny_gltf.h
-    -I src
-
     # ── Module / binding settings ─────────────────────────────────────────────
     # MODULARIZE wraps the module in a factory function (importable from Workers)
     # EXPORT_NAME   is the global name / import default
@@ -36,12 +29,11 @@ COMMON=(
     -s MODULARIZE=1
     -s EXPORT_NAME=VoxelizerModule
     -lembind
-    
 
     # ── Memory ───────────────────────────────────────────────────────────────
-    # 256 MB initial to avoid frequent reallocs on large GLB files.
-    -s INITIAL_MEMORY=256MB
-    -s MAXIMUM_MEMORY=1GB
+    # Grows on demand; a 512³ grid plus its working buffers needs ~0.5 GB.
+    -s INITIAL_MEMORY=64MB
+    -s MAXIMUM_MEMORY=2GB
     -s ALLOW_MEMORY_GROWTH=1
 
     # ── Output format ─────────────────────────────────────────────────────────

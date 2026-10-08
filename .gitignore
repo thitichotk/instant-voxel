@@ -2,3 +2,8 @@
 src/
 
 .DS_Store
+
+# Model server: local virtualenv, cloned Stable Fast 3D, Python caches
+server/.venv/
+server/vendor/
+__pycache__/
