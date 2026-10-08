@@ -1,0 +1,34 @@
+# Instant-Voxel
+
+> Instant-Voxel turns 3D models and images into voxel art in the browser, lets you edit the voxels, and exports
+> them for MagicaVoxel, Minecraft, game engines or 3D printing. Files stay on your computer; only the optional model
+> server, which you run yourself, receives anything.
+
+A C++ kernel compiled to WebAssembly does the voxelising, and three.js reads the model files and draws the result.
+The page opens on a small sample island, so the editor and the exports can be tried straight away. It is designed
+for a desktop; on a phone, viewing, converting and exporting work.
+
+## What it takes and gives
+
+- Models in: GLB, glTF, OBJ with MTL, FBX, STL, PLY, 3MF and DAE, with textures and vertex colours.
+- Images in: pixel art extruded voxel for voxel, a greyscale heightmap as terrain, or a photo turned into a relief
+  by an in-browser depth model.
+- Voxelising: up to 512 voxels per side, solid or hollow, with an automatic palette, Minecraft blocks or any `.hex`
+  palette.
+- Editing: paint, erase, add, fill, pick and box tools, with mirroring, undo and a cut-height slider.
+- Exports: `.vox` (MagicaVoxel), `.glb` (game engines), `.obj` (Blender), `.stl` (3D printing) and `.schem`
+  (Minecraft WorldEdit, FAWE and Litematica).
+
+## Using it
+
+1. Drop a model, an image or a `.vox` file onto the page, or pick files under Source.
+2. Set the size and the other Voxelise options.
+3. Touch it up with the Edit tools. Press `?` for the keyboard shortcuts.
+4. Choose a format under Export and press Download.
+
+## Links
+
+- [Instant-Voxel](https://instantvoxel.thitichotk.com/): the app
+- [Source on GitHub](https://github.com/thitichotk/instant-voxel): MIT licence
+- [README](https://github.com/thitichotk/instant-voxel/blob/main/README.md): formats, how it works and its limits
+- [Model server](https://github.com/thitichotk/instant-voxel/blob/main/server/README.md): optional photo- and text-to-3D server

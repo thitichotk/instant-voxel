@@ -12,7 +12,7 @@ voxelising and three.js reads the model files and draws the result. You can touc
 exporting them for MagicaVoxel, Minecraft, a game engine or a 3D printer. Your files stay on your computer; only the
 optional model server receives anything, and you choose where it runs.
 
-![Instant-Voxel with the built-in sample island: Source and Generate on the left, the viewport, and Convert, Edit and View on the right](.github/screenshot.jpg)
+![Instant-Voxel with the built-in sample island: Source and Generate on the left, the viewport, and Convert, Edit and View on the right](web/assets/screenshot.jpg)
 
 ## Using it
 
