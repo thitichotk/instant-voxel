@@ -18,6 +18,7 @@ import { summarize, index } from './grid.js';
 import { History, brush, box, floodFill } from './editor.js';
 
 const $ = (sel) => document.querySelector(sel);
+const AI_NOTE = $('#ai-note').textContent;   // credit for servers that don't send one
 
 // ── Settings (persisted) ──────────────────────────────────────────────────────
 
@@ -608,6 +609,7 @@ async function checkServer() {
         const h = await serverHealth({ url: settings.aiUrl, key: settings.aiKey, signal: AbortSignal.timeout(4000) });
         el.className = 'help ok';
         el.textContent = `Connected · ${h.device}`;
+        $('#ai-note').textContent = h.credit ?? AI_NOTE;
         return true;
     } catch (err) {
         el.className = 'help error';

@@ -41,12 +41,25 @@ the models; later jobs start at once.
 - To try the API without the models, run `FAKE_MODELS=1 uvicorn app:app --port 8000`. It returns a cube coloured
   like the photo, or keyed to the prompt, and needs only the four packages under `# API` in `requirements.txt`.
 
+## Run it with TRELLIS.2 on a CUDA GPU (24 GB+)
+
+[TRELLIS.2](https://github.com/microsoft/TRELLIS.2) makes better shapes and PBR textures than SF3D, but needs an
+NVIDIA GPU with 24 GB or more (SDXL for prompts needs more on the same card: plan for 40 GB). Install it from its
+repo (`setup.sh --basic --nvdiffrast --cumesh --o-voxel --flexgemm`, plus `flash-attn`, or PyTorch 2.10+ whose own varlen attention the server uses instead), then:
+
+```bash
+MODEL=trellis2 PYTHONPATH=/path/to/TRELLIS.2 API_KEY=<key> uvicorn app:app --port 8000
+```
+
+The app's credit line follows the server's model (`credit` in `/v1/health`).
+
 ## Settings (environment variables)
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `ALLOWED_ORIGINS` | `http://127.0.0.1:3000,http://localhost:3000,https://instantvoxel.thitichotk.com` | Sites allowed to call the server (CORS) |
 | `API_KEY` | unset | If set, requests must send `Authorization: Bearer <key>` |
+| `MODEL` | `sf3d` | `sf3d` (Stable Fast 3D, runs on a Mac) or `trellis2` (TRELLIS.2, CUDA only) |
 | `SF3D_DIR` | `vendor/stable-fast-3d` | Where the SF3D repo is cloned |
 | `FAKE_MODELS` | unset | `1` serves placeholder cubes |
 
@@ -59,3 +72,7 @@ The server's own code is MIT, like the rest of the repo. The models it downloads
   Stability AI"** notice (the web app shows one on server results).
 - **SDXL and SDXL-Lightning:** CreativeML Open RAIL++-M (commercial use allowed, with use-based restrictions).
 - **rembg:** MIT.
+- **TRELLIS.2:** MIT. It conditions on **DINOv3** (Meta's DINOv3 License: commercial use allowed; no military,
+  weapons or sanctioned uses). Meta's repo is gated behind a form, so the server loads the identical, ungated
+  `camenduru/dinov3-vitl16-pretrain-lvd1689m` copy, which the licence allows. Its background
+  remover is swapped from `briaai/RMBG-2.0` (CC BY-NC) to `ZhengPeng7/BiRefNet` (MIT).

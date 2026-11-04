@@ -1,6 +1,6 @@
 """Instant-Voxel model server: the job API the web app's "Model server" provider speaks.
 
-    GET  /v1/health            → { ok, device, image: true, text: true }
+    GET  /v1/health            → { ok, device, image: true, text: true, credit }
     POST /v1/jobs              multipart: image? (PNG/JPEG/WebP ≤ 10 MB), prompt?, seed?  → 202 { id }
     GET  /v1/jobs/{id}         → { status: queued|running|done|error, stage, error? }
     GET  /v1/jobs/{id}/result  → model/gltf-binary
@@ -18,6 +18,7 @@ import os
 import queue
 import secrets
 import threading
+import traceback
 import uuid
 from collections import OrderedDict
 
@@ -77,6 +78,7 @@ def worker():
             job["result"] = models.image_to_glb(image, stage)
             job.update(status="done", stage="done")
         except Exception as err:  # reported to the client, then the next job runs
+            traceback.print_exc()  # the client only gets str(err)
             job.update(status="error", error=str(err))
 
 
@@ -85,7 +87,7 @@ threading.Thread(target=worker, daemon=True).start()
 
 @app.get("/v1/health", dependencies=[Depends(authorized)])
 def health():
-    return {"ok": True, "device": models.device(), "image": True, "text": True}
+    return {"ok": True, "device": models.device(), "image": True, "text": True, "credit": models.CREDIT}
 
 
 @app.post("/v1/jobs", status_code=202, dependencies=[Depends(authorized)])
