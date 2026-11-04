@@ -41,7 +41,7 @@ the models; later jobs start at once.
 - To try the API without the models, run `FAKE_MODELS=1 uvicorn app:app --port 8000`. It returns a cube coloured
   like the photo, or keyed to the prompt, and needs only the four packages under `# API` in `requirements.txt`.
 
-## Run it with TRELLIS.2 on a CUDA GPU (24 GB+)
+## Run it with TRELLIS.2 or Pixal3D on a CUDA GPU (24 GB+)
 
 [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) makes better shapes and PBR textures than SF3D, but needs an
 NVIDIA GPU with 24 GB or more (plan for 40 GB with prompts: SDXL shares the card). `setup-cuda.sh` installs it and
@@ -49,9 +49,17 @@ starts the server on any Linux machine with one: Colab, RunPod, Lambda, your own
 the CUDA toolkit (`nvcc`) of PyTorch's CUDA version. The first run builds TRELLIS.2's CUDA extensions (about 15
 minutes); later runs skip what is done.
 
+[Pixal3D](https://github.com/TencentARC/Pixal3D), from Tencent ARC, is built on TRELLIS.2 and keeps the 3D model
+closer to the photo: it estimates the photo's camera (with MoGe-2) and aligns the model to its pixels. The model
+therefore faces the way the photo does: a photo taken from above gives a model tilted the same way, where TRELLIS.2
+stands it upright. It needs the same GPU; with SDXL loaded too it uses about 34 GB. `MODEL=pixal3d` adds it on top
+of the TRELLIS.2 install, and running the script again with the other `MODEL` switches the running server (the URL
+stays the same).
+
 ```bash
-API_KEY=<key> server/setup-cuda.sh            # http://127.0.0.1:8000; reach it with ssh -L 8000:127.0.0.1:8000
-API_KEY=<key> server/setup-cuda.sh --public   # also prints a public https://….trycloudflare.com URL
+API_KEY=<key> server/setup-cuda.sh                 # http://127.0.0.1:8000; reach it with ssh -L 8000:127.0.0.1:8000
+API_KEY=<key> server/setup-cuda.sh --public        # also prints a public https://….trycloudflare.com URL
+MODEL=pixal3d API_KEY=<key> server/setup-cuda.sh --public   # Pixal3D instead of TRELLIS.2
 ```
 
 In the app, open **Generate**, choose **Model server**, and paste the URL and key. Logs are in `server/vendor/`;
@@ -63,7 +71,7 @@ In the app, open **Generate**, choose **Model server**, and paste the URL and ke
 |---|---|---|
 | `ALLOWED_ORIGINS` | `http://127.0.0.1:3000,http://localhost:3000,https://instantvoxel.thitichotk.com` | Sites allowed to call the server (CORS) |
 | `API_KEY` | unset | If set, requests must send `Authorization: Bearer <key>` |
-| `MODEL` | `sf3d` | `sf3d` (Stable Fast 3D, runs on a Mac) or `trellis2` (TRELLIS.2, CUDA only) |
+| `MODEL` | `sf3d` | `sf3d` (Stable Fast 3D, runs on a Mac), `trellis2` (TRELLIS.2) or `pixal3d` (Pixal3D); the last two are CUDA only |
 | `SF3D_DIR` | `vendor/stable-fast-3d` | Where the SF3D repo is cloned |
 | `FAKE_MODELS` | unset | `1` serves placeholder cubes |
 
@@ -80,3 +88,6 @@ The server's own code is MIT, like the rest of the repo. The models it downloads
   weapons or sanctioned uses). Meta's repo is gated behind a form, so the server loads the identical, ungated
   `camenduru/dinov3-vitl16-pretrain-lvd1689m` copy, which the licence allows. Its background
   remover is swapped from `briaai/RMBG-2.0` (CC BY-NC) to `ZhengPeng7/BiRefNet` (MIT).
+- **Pixal3D:** MIT (code and weights), with the same DINOv3 copy and BiRefNet swap as TRELLIS.2, plus **MoGe-2**
+  (MIT) for the camera and Valeo's **NAF** upsampler (Apache-2.0). Its Hugging Face page asks EU visitors not to
+  download it, though the MIT licence itself has no such limit.
