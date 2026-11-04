@@ -44,14 +44,18 @@ the models; later jobs start at once.
 ## Run it with TRELLIS.2 on a CUDA GPU (24 GB+)
 
 [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) makes better shapes and PBR textures than SF3D, but needs an
-NVIDIA GPU with 24 GB or more (SDXL for prompts needs more on the same card: plan for 40 GB). Install it from its
-repo (`setup.sh --basic --nvdiffrast --cumesh --o-voxel --flexgemm`, plus `flash-attn`, or PyTorch 2.10+ whose own varlen attention the server uses instead), then:
+NVIDIA GPU with 24 GB or more (plan for 40 GB with prompts: SDXL shares the card). `setup-cuda.sh` installs it and
+starts the server on any Linux machine with one: Colab, RunPod, Lambda, your own PC. It needs git, Python 3.10+ and
+the CUDA toolkit (`nvcc`) of PyTorch's CUDA version. The first run builds TRELLIS.2's CUDA extensions (about 15
+minutes); later runs skip what is done.
 
 ```bash
-MODEL=trellis2 PYTHONPATH=/path/to/TRELLIS.2 API_KEY=<key> uvicorn app:app --port 8000
+API_KEY=<key> server/setup-cuda.sh            # http://127.0.0.1:8000; reach it with ssh -L 8000:127.0.0.1:8000
+API_KEY=<key> server/setup-cuda.sh --public   # also prints a public https://….trycloudflare.com URL
 ```
 
-The app's credit line follows the server's model (`credit` in `/v1/health`).
+In the app, open **Generate**, choose **Model server**, and paste the URL and key. Logs are in `server/vendor/`;
+`PORT` picks another port. The app's credit line follows the server's model (`credit` in `/v1/health`).
 
 ## Settings (environment variables)
 
