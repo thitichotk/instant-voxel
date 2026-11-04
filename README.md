@@ -33,8 +33,8 @@ The page opens on a small sample island, so the editor and the exports can be tr
 - **Images in:** pixel art extruded voxel for voxel, or a greyscale heightmap as terrain.
 - **AI, in the browser:** a photo becomes a voxel relief using Depth Anything V2 on your GPU. The background is cut by
   depth, or by an AI mask where WebGPU is available. The models download once and are then cached.
-- **AI, on a model server:** a photo or a text prompt becomes a full 3D object with Stable Fast 3D, running on your
-  own machine or a hosted GPU ([`server/`](server/README.md)).
+- **AI, on a model server:** a photo or a text prompt becomes a full, textured 3D object with Stable Fast 3D, or with
+  TRELLIS.2 on a 24 GB+ CUDA GPU, running on your own machine or a hosted GPU ([`server/`](server/README.md)).
 - **Voxelising:** up to 512 voxels per side, solid fill, hollow shells, removal of small floating islands, and a
   ghost of the source model to check the fit.
 - **Colour:** an automatic palette (median cut in Oklab, 2 to 255 colours), Minecraft blocks, a default cube, or any
@@ -120,8 +120,9 @@ Built with plain HTML, CSS and ES modules, [three.js](https://threejs.org/) 0.16
 - [Depth Anything V2 Small](https://huggingface.co/onnx-community/depth-anything-v2-small) (Apache-2.0) and
   [BiRefNet lite](https://huggingface.co/onnx-community/BiRefNet_lite-ONNX) (MIT) load from Hugging Face on first
   use.
-- The model server downloads Stable Fast 3D (Stability AI Community License, "Powered by Stability AI") and SDXL
-  with SDXL-Lightning (CreativeML Open RAIL++-M); see [`server/README.md`](server/README.md).
+- The model server downloads Stable Fast 3D (Stability AI Community License, "Powered by Stability AI") or TRELLIS.2
+  (MIT, with DINOv3 under Meta's DINOv3 License and BiRefNet, MIT), and SDXL with SDXL-Lightning (CreativeML Open
+  RAIL++-M); see [`server/README.md`](server/README.md).
 - Plus Jakarta Sans and JetBrains Mono (SIL Open Font License) and Material Symbols (Apache-2.0) come from Google
   Fonts.
 - The block colours are averages of Minecraft's textures; no textures are included.
